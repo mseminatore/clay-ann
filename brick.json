@@ -1,0 +1,14 @@
+{
+  "name": "ann",
+  "version": "0.1.0",
+  "description": "Neural networks for Clay: a native brick over libann",
+  "main": "src/main.clay",
+  "deps": {},
+  "native": {
+    "plugin": "ann",
+    "sources": ["native/clay_ann.c", "native/libann/ann.c", "native/libann/tensor.c",
+                "native/libann/ann_hypertune.c", "native/libann/json.c", "native/libann/ann_quantize.c"],
+    "cflags": [],
+    "libs": ["-lm", "-lpthread"]
+  }
+}

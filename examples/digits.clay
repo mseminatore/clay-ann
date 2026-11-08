@@ -1,0 +1,47 @@
+// Recognize 5x7 pixel digits, then the same digits with pixels flipped
+import("ann")
+
+glyphs = [
+    [" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### "],
+    ["  #  ", " ##  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
+    [" ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####"],
+    ["#####", "   # ", "  #  ", "   # ", "    #", "#   #", " ### "],
+    ["   # ", "  ## ", " # # ", "#  # ", "#####", "   # ", "   # "],
+    ["#####", "#    ", "#### ", "    #", "    #", "#   #", " ### "],
+    ["  ## ", " #   ", "#    ", "#### ", "#   #", "#   #", " ### "],
+    ["#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   "],
+    [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "],
+    [" ### ", "#   #", "#   #", " ####", "    #", "   # ", " ##  "]
+]
+
+// a glyph as 35 inputs: 1 for '#', 0 for ' '
+pixels = { |rows|
+    out = []
+    rows each { |row| i = 0; { i < 5 } whileTrue { out push(((row at(i)) == "#") ifTrue { 1 } ifFalse { 0 }); i = i + 1 } }
+    out
+}
+
+inputs = glyphs map { |g| pixels value(g) }
+labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+targets = Ann oneHot(labels, 10)
+
+Ann seed(7)
+net = Ann network(#{"optimizer": "sgd", "learningRate": 0.35, "epochs": 3000, "quiet": true})
+net input(35)
+net dense(48, "sigmoid")
+net output(10, "sigmoid")
+net train(inputs, targets)
+("training accuracy: " + ((net accuracy(inputs, targets)) * 100) toString + "%") println
+
+// flip three pixels of each digit, chosen per digit so runs repeat
+correct = 0
+labels each { |d|
+    noisy = (inputs at(d)) map { |p| p }
+    [(d * 7 + 3) % 35, (d * 11 + 5) % 35, (d * 13 + 17) % 35] each { |k|
+        noisy setAt(k, 1 - (noisy at(k)))
+    }
+    guess = net classify(noisy)
+    (guess == d) ifTrue { correct = correct + 1 }
+    ("  " + d toString + " with 3 pixels flipped -> " + guess toString) println
+}
+("noisy digits recognized: " + correct toString + "/10") println

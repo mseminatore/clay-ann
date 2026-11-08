@@ -1,0 +1,48 @@
+// ann -- neural networks for Clay, over libann (a native brick)
+//
+// Usage:
+//   import("ann")
+//
+//   net = Ann network(#{"loss": "mse", "learningRate": 0.5, "epochs": 2000, "quiet": true})
+//   net input(2)
+//   net dense(4, "sigmoid")
+//   net output(1, "sigmoid")
+//   net train([[0, 0], [0, 1], [1, 0], [1, 1]], [[0], [1], [1], [0]])
+//   net predict([1, 0])                // [0.97...]
+//
+// A network is an AnnNet (the C plugin's prototype); see README.md for every
+// method. Data are Arrays of rows of numbers.
+
+Ann = Object clone {
+    // A new, empty network. Options (all optional):
+    //   optimizer: "adam" (default), "sgd", "momentum", "rmsprop", "adagrad"
+    //   loss: "mse" (default) or "cross_entropy"
+    //   learningRate, epochs, batchSize, convergence (stop below this loss)
+    //   quiet: true silences libann's training progress
+    network(options = nil) {
+        o = options ?? #{}
+        net = AnnNet create((o get("optimizer")) ?? "adam", (o get("loss")) ?? "mse")
+        (o has("learningRate")) ifTrue { net learningRate(o get("learningRate")) }
+        (o has("epochs")) ifTrue { net epochs(o get("epochs")) }
+        (o has("batchSize")) ifTrue { net batchSize(o get("batchSize")) }
+        (o has("convergence")) ifTrue { net convergence(o get("convergence")) }
+        ((o get("quiet")) == true) ifTrue { net quiet }
+        net
+    }
+
+    // A network saved with net save(path)
+    load(path) { AnnNet load(path) }
+
+    // Make weight initialization (and so training) repeatable
+    seed(n) { AnnNet seed(n) }
+
+    // One-hot rows: oneHot([2, 0], 3) -> [[0, 0, 1], [1, 0, 0]]
+    oneHot(labels, classes) {
+        labels map { |k|
+            row = []
+            i = 0
+            { i < classes } whileTrue { row push((i == k) ifTrue { 1 } ifFalse { 0 }); i = i + 1 }
+            row
+        }
+    }
+}

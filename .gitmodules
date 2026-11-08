@@ -1,0 +1,3 @@
+[submodule "native/libann"]
+	path = native/libann
+	url = https://github.com/mseminatore/ann.git

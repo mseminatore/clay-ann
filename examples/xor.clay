@@ -1,0 +1,18 @@
+// XOR: the classic problem a single-layer network can't learn
+import("ann")
+
+Ann seed(42)
+net = Ann network(#{"learningRate": 0.5, "epochs": 5000, "convergence": 0.001, "quiet": true})
+net input(2)
+net dense(4, "sigmoid")
+net output(1, "sigmoid")
+
+inputs = [[0, 0], [0, 1], [1, 0], [1, 1]]
+targets = [[0], [1], [1], [0]]
+loss = net train(inputs, targets)
+("trained: loss " + loss toString) println
+
+inputs each { |x|
+    y = (net predict(x)) at(0)
+    ("  " + x toString + " -> " + ((Math round(y * 100)) / 100.0) toString) println
+}

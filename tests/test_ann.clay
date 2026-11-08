@@ -1,0 +1,49 @@
+// tests for the ann brick (run from a project with this brick installed:
+// clay tests/test_ann.clay, or see README.md)
+import("ann")
+
+failures = 0
+check = { |what, ok|
+    ok ifFalse { ("FAIL: " + what) println; failures = failures + 1 }
+}
+raises = { |block| try { block value; "no error" } catch { |e| e type } }
+
+Ann seed(1)
+net = Ann network(#{"learningRate": 0.5, "epochs": 4000, "convergence": 0.001, "quiet": true})
+net input(2)
+net dense(4, "sigmoid")
+net output(1, "sigmoid")
+check value("layer sizes", net sizes == [2, 4, 1])
+
+xs = [[0, 0], [0, 1], [1, 0], [1, 1]]
+ys = [[0], [1], [1], [0]]
+loss = net train(xs, ys)
+check value("trained below the convergence limit", loss < 0.01)
+check value("predict returns the outputs", (net predict([0, 1])) size == 1)
+check value("xor learned", ((net predict([0, 1])) at(0)) > 0.8 && ((net predict([1, 1])) at(0)) < 0.2)
+check value("evaluate is the loss", (net evaluate(xs, ys)) < 0.05)
+
+// save and load reproduce the network
+dir = File tempDir
+path = dir + "/xor.nna"
+net save(path)
+copy = Ann load(path)
+check value("loaded sizes", copy sizes == [2, 4, 1])
+check value("loaded predictions match", (copy predict([1, 0])) == (net predict([1, 0])))
+File delete(path)
+File delete(dir)
+
+// classification helpers
+check value("oneHot", Ann oneHot([2, 0], 3) == [[0, 0, 1], [1, 0, 0]])
+
+// errors are Clay errors, not crashes
+check value("wrong input width", (raises value({ net predict([1, 2, 3]) })) == "ArgumentError")
+check value("ragged rows", (raises value({ net train([[1, 2], [3]], [[1], [0]]) })) == "ArgumentError")
+check value("row count mismatch", (raises value({ net train(xs, [[1]]) })) == "ArgumentError")
+check value("bad activation", (raises value({ Ann network input(2) dense(3, "nope") })) == "ArgumentError")
+check value("bad optimizer", (raises value({ Ann network(#{"optimizer": "x"}) })) == "ArgumentError")
+check value("non-number data", (raises value({ net predict([1, "x"]) })) == "TypeError")
+check value("missing file", (raises value({ Ann load("/no/such/file.nna") })) == "RuntimeError")
+
+(failures > 0) ifTrue { (failures toString + " failed") println; System exit(1) }
+"ann: all tests passed" println
