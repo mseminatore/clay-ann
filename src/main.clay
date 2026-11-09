@@ -10,8 +10,32 @@
 //   net train([[0, 0], [0, 1], [1, 0], [1, 1]], [[0], [1], [1], [0]])
 //   net predict([1, 0])                // [0.97...]
 //
-// A network is an AnnNet (the C plugin's prototype); see README.md for every
-// method. Data are Arrays of rows of numbers.
+// How it fits together: `Ann` (below) only makes networks. Each network is
+// a clone of AnnNet, the prototype the C plugin registers (native/clay_ann.c),
+// so its methods are written in C and call libann directly. They are:
+//
+//   Building (each returns the network, so calls chain)
+//     input(n)                 the input layer: n values per sample
+//     dense(n, activation)     a fully connected hidden layer
+//     output(n, activation)    the output layer
+//     addLayer(n, kind, act)   the general form: kind "input", "hidden", "output"
+//       activations: "sigmoid" (default), "relu", "leaky_relu", "tanh",
+//                    "softsign", "softmax", "gelu", "none"
+//
+//   Settings (each returns the network; Ann network sets them from options)
+//     learningRate(r)  epochs(n)  batchSize(n)  convergence(loss)  quiet
+//
+//   Training and using it (data are Arrays of rows of numbers)
+//     train(inputs, targets)     -> the final loss
+//     predict(row)               -> the outputs, an Array
+//     classify(row)              -> the index of the largest output
+//     accuracy(inputs, targets)  -> the fraction classified correctly, 0 to 1
+//     evaluate(inputs, targets)  -> the loss over the data
+//     sizes                      -> the layer sizes, e.g. [2, 4, 1]
+//     save(path)                 writes the network (Ann load(path) reads it)
+//
+// Mistakes (wrong input count, ragged rows, unknown names) raise ArgumentError.
+// `(Ann network) methods` lists them at run time too (with Object's own).
 
 Ann = Object clone {
     // A new, empty network. Options (all optional):
