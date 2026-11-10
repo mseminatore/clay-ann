@@ -74,6 +74,34 @@ classes)` turns class numbers into target rows: `Ann oneHot([2, 0], 3)` is
 Mistakes such as the wrong number of inputs, ragged rows or an unknown activation raise a Clay
 `ArgumentError`. Numbers are 32-bit floats, as everywhere in Clay and libann.
 
+## Large data: `Ann loadCsv`
+
+An Array of rows boxes every number, so a data set like MNIST (60,000 rows of 785 values) is slow
+to parse and takes gigabytes as Arrays. `Ann loadCsv(path, header)` instead reads the file in C into
+an `AnnData` table, which `train`, `accuracy` and `evaluate` accept wherever they take Arrays:
+
+```clay
+data = Ann loadCsv("mnist_train.csv", true)      // true: skip the header line
+x = (data columns(1)) scale(255)                 // pixels, 0 to 1
+y = (data column(0)) oneHot(10)                  // labels -> 10 target columns
+net train(x, y)
+```
+
+Every value in the file must be a number (spaces, tabs or commas separate them); a bad value or a
+ragged line raises `ArgumentError` naming the line. Loading all of `mnist_train.csv` takes under a
+second. The methods below return new tables, so they chain; `to` is exclusive and optional.
+
+| Method | Returns |
+|--------|---------|
+| `rows`, `cols` | the table's size |
+| `slice(from, to)` | those rows (`to` defaults to the end): for a train/test split |
+| `columns(from, to)` | those columns |
+| `column(n)` | one column, as a one-column table |
+| `oneHot(classes)` | a one-column table of labels `0..classes-1` as rows of `classes` columns |
+| `scale(divisor)` | every value divided by `divisor` |
+| `row(i)` | row `i` as an Array |
+| `toArray` | an Array of rows (boxes every value, so avoid on big tables) |
+
 ## Examples
 
 - [`examples/xor.clay`](examples/xor.clay): the classic problem a single layer can't learn.

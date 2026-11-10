@@ -2,7 +2,8 @@
  * clay_ann.c - the Clay plugin for libann (native/libann, a git submodule)
  *
  * Registers the AnnNet prototype: each network object holds a libann
- * PNetwork, freed with the object. Training data crosses into C as float
+ * PNetwork, freed with the object; AnnData objects hold a table of numbers
+ * (a libann tensor) for loading and handing big data sets to a network. Training data crosses into C as float
  * buffers (Clay floats and libann's `real` are both 32-bit floats). The Clay
  * side (src/main.clay) adds the friendlier `Ann` API on top.
  */
@@ -66,6 +67,42 @@ static PTensor tensor_from(ClayPluginValue rows, const char *what) {
     PTensor t = tensor_create_from_array((int)r, (int)(n / r), buf);
     free(buf);
     return t;
+}
+
+
+/* --- AnnData: a rows x cols table of numbers held in C -------------------
+ * Loading MNIST-sized data through Clay Arrays means one boxed value per
+ * number; an AnnData keeps the numbers in a libann tensor instead, and
+ * train/accuracy/evaluate use it directly. */
+
+static ClayPluginObject data_proto;
+
+static void data_free(void *data) { if (data) tensor_free((PTensor)data); }
+
+/* an AnnData object wrapping t (takes ownership of t) */
+static ClayPluginValue data_wrap(PTensor t) {
+    if (!t) { api->raise("ann: out of memory", "RuntimeError"); return 0; }
+    ClayPluginObject obj = api->clone(data_proto);
+    api->set_data(obj, t);
+    return (ClayPluginValue)obj;
+}
+
+/* the tensor inside v if it is an AnnData, else NULL (v borrowed, not copied) */
+static PTensor data_of(ClayPluginValue v) {
+    if (api->is_int(v) || api->is_float(v) || api->is_nil(v) || api->is_array(v) || api->is_string(v))
+        return NULL;
+    ClayPluginObject o = (ClayPluginObject)v;
+    if (api->is_nil(api->get_slot(o, "_annData"))) return NULL;
+    return (PTensor)api->get_data(o);
+}
+
+/* training data as a tensor: an AnnData is used as is (*owned = 0), an Array
+ * of rows is converted to a new tensor the caller frees (*owned = 1) */
+static PTensor tensor_arg(ClayPluginValue v, const char *what, int *owned) {
+    PTensor t = data_of(v);
+    if (t) { *owned = 0; return t; }
+    *owned = 1;
+    return tensor_from(v, what);
 }
 
 static int input_size(PNetwork n)  { return n->layer_count > 0 ? n->layers[0].node_count : 0; }
@@ -137,28 +174,23 @@ static ClayPluginValue net_input(ClayPluginObject s, int c, ClayPluginValue *v) 
 static ClayPluginValue net_dense(ClayPluginObject s, int c, ClayPluginValue *v)  { return layer_as(s, c, v, "hidden"); }
 static ClayPluginValue net_output(ClayPluginObject s, int c, ClayPluginValue *v) { return layer_as(s, c, v, "output"); }
 
-/* net train(inputs, targets) -> the final loss */
+/* net train(inputs, targets) -> the final loss. Each is an Array of rows or an AnnData */
 static ClayPluginValue net_train(ClayPluginObject self, int argc, ClayPluginValue *argv) {
     PNetwork n = net_of(self, "train");
     if (argc < 2) { api->raise("train needs inputs and targets", "ArgumentError"); return 0; }
-    PTensor x = tensor_from(argv[0], "inputs");
-    PTensor y = tensor_from(argv[1], "targets");
-    if (x->rows != y->rows) {
-        tensor_free(x); tensor_free(y);
-        api->raise("train: inputs and targets need the same number of rows", "ArgumentError");
-        return 0;
-    }
-    if (x->cols != input_size(n) || y->cols != output_size(n)) {
-        char msg[160];
+    int xo, yo;
+    PTensor x = tensor_arg(argv[0], "inputs", &xo);
+    PTensor y = tensor_arg(argv[1], "targets", &yo);
+    char msg[160] = "";
+    if (x->rows != y->rows)
+        snprintf(msg, sizeof(msg), "train: inputs and targets need the same number of rows");
+    else if (x->cols != input_size(n) || y->cols != output_size(n))
         snprintf(msg, sizeof(msg), "train: rows must have %d inputs and %d targets (got %d and %d)",
                  input_size(n), output_size(n), x->cols, y->cols);
-        tensor_free(x); tensor_free(y);
-        api->raise(msg, "ArgumentError");
-        return 0;
-    }
-    real loss = ann_train_network(n, x, y, x->rows);
-    tensor_free(x);
-    tensor_free(y);
+    real loss = msg[0] ? 0 : ann_train_network(n, x, y, x->rows);
+    if (xo) tensor_free(x);
+    if (yo) tensor_free(y);
+    if (msg[0]) { api->raise(msg, "ArgumentError"); return 0; }
     return api->make_float(loss);
 }
 
@@ -204,11 +236,12 @@ static ClayPluginValue net_classify(ClayPluginObject self, int argc, ClayPluginV
 static ClayPluginValue net_score(ClayPluginObject self, int argc, ClayPluginValue *argv, int loss) {
     PNetwork n = net_of(self, loss ? "evaluate" : "accuracy");
     if (argc < 2) { api->raise("needs inputs and targets", "ArgumentError"); return 0; }
-    PTensor x = tensor_from(argv[0], "inputs");
-    PTensor y = tensor_from(argv[1], "targets");
+    int xo, yo;
+    PTensor x = tensor_arg(argv[0], "inputs", &xo);
+    PTensor y = tensor_arg(argv[1], "targets", &yo);
     real v = loss ? ann_evaluate_loss(n, x, y) : ann_evaluate_accuracy(n, x, y);
-    tensor_free(x);
-    tensor_free(y);
+    if (xo) tensor_free(x);
+    if (yo) tensor_free(y);
     return api->make_float(v);
 }
 static ClayPluginValue net_accuracy(ClayPluginObject s, int c, ClayPluginValue *v) { return net_score(s, c, v, 0); }
@@ -279,6 +312,188 @@ static void quiet_errors(int code, const char *msg, const char *func) {
     (void)code; (void)msg; (void)func;
 }
 
+/* --- AnnData methods ---------------------------------------------------- */
+
+static char csv_error[256];
+static void capture_error(int code, const char *msg, const char *func) {
+    (void)code; (void)func;
+    snprintf(csv_error, sizeof(csv_error), "%s", msg ? msg : "unknown error");
+}
+
+static PTensor self_tensor(ClayPluginObject self, const char *who) {
+    PTensor t = (PTensor)api->get_data(self);
+    if (!t) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s: not a data table (make one with Ann loadCsv)", who);
+        api->raise(msg, "RuntimeError");
+    }
+    return t;
+}
+
+/* AnnData loadCsv(path, header) -> a table of the file's numbers. Every value
+ * must be a number; header (default false) skips the first line. */
+static ClayPluginValue data_load_csv(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)self;
+    const char *path = str_arg(argc, argv, 0, NULL);
+    if (!path) { api->raise("loadCsv needs a file path", "ArgumentError"); return 0; }
+    int header = argc > 1 && !api->is_nil(argv[1]) && argv[1] != api->make_bool(0);
+    real *buf = NULL;
+    int rows = 0, stride = 0;
+    csv_error[0] = 0;
+    ann_set_error_log_callback(capture_error);
+    int rc = ann_load_csv(path, header ? CSV_HAS_HEADER : CSV_NO_HEADER, &buf, &rows, &stride);
+    ann_set_error_log_callback(quiet_errors);
+    if (rc != ERR_OK || !buf || rows <= 0 || stride <= 0) {
+        char msg[320];
+        snprintf(msg, sizeof(msg), "loadCsv: %s", csv_error[0] ? csv_error : "cannot read the file");
+        if (buf) ann_free_csv(buf);
+        api->raise(msg, rc == ERR_INVALID ? "ArgumentError" : "RuntimeError");
+        return 0;
+    }
+    PTensor t = tensor_create_from_array(rows, stride, buf);
+    ann_free_csv(buf);
+    return data_wrap(t);
+}
+
+static ClayPluginValue data_rows(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    PTensor t = self_tensor(self, "rows");
+    return t ? api->make_int(t->rows) : 0;
+}
+static ClayPluginValue data_cols(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    PTensor t = self_tensor(self, "cols");
+    return t ? api->make_int(t->cols) : 0;
+}
+
+/* a range argument pair: from..to, to exclusive (to defaults to from + 1 if
+ * one_default, else to the end) */
+static int range_args(const char *who, int argc, ClayPluginValue *argv, int limit,
+                      int one_default, int *from, int *to) {
+    if (argc < 1 || !api->is_int(argv[0])) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s needs integer positions", who);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    *from = (int)api->to_int(argv[0]);
+    if (argc > 1 && api->is_int(argv[1])) *to = (int)api->to_int(argv[1]);
+    else *to = one_default ? *from + 1 : limit;
+    if (*from < 0 || *to > limit || *from >= *to) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "%s: %d..%d is outside 0..%d", who, *from, *to, limit);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    return 1;
+}
+
+/* a copy of rows [from, to) and columns [c0, c1) */
+static PTensor sub_table(PTensor t, int r0, int r1, int c0, int c1) {
+    int rows = r1 - r0, cols = c1 - c0;
+    PTensor r = tensor_create(rows, cols);
+    if (!r) return NULL;
+    for (int i = 0; i < rows; i++)
+        memcpy(r->values + (size_t)i * cols, t->values + (size_t)(r0 + i) * t->cols + c0,
+               (size_t)cols * sizeof(real));
+    return r;
+}
+
+/* data slice(from, to) -> rows from..to-1 (to defaults to the end) */
+static ClayPluginValue data_slice(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PTensor t = self_tensor(self, "slice");
+    int a, b;
+    if (!t || !range_args("slice", argc, argv, t->rows, 0, &a, &b)) return 0;
+    return data_wrap(sub_table(t, a, b, 0, t->cols));
+}
+
+/* data columns(from, to) -> columns from..to-1 (to defaults to the end) */
+static ClayPluginValue data_columns(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PTensor t = self_tensor(self, "columns");
+    int a, b;
+    if (!t || !range_args("columns", argc, argv, t->cols, 0, &a, &b)) return 0;
+    return data_wrap(sub_table(t, 0, t->rows, a, b));
+}
+
+/* data column(n) -> column n, as a one-column table */
+static ClayPluginValue data_column(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PTensor t = self_tensor(self, "column");
+    int a, b;
+    if (!t || !range_args("column", argc, argv, t->cols, 1, &a, &b)) return 0;
+    return data_wrap(sub_table(t, 0, t->rows, a, a + 1));
+}
+
+/* data oneHot(classes) -> rows x classes, from a one-column table of labels 0..classes-1 */
+static ClayPluginValue data_one_hot(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PTensor t = self_tensor(self, "oneHot");
+    if (!t) return 0;
+    if (argc < 1 || !api->is_int(argv[0]) || api->to_int(argv[0]) <= 0) {
+        api->raise("oneHot needs the number of classes", "ArgumentError");
+        return 0;
+    }
+    int classes = (int)api->to_int(argv[0]);
+    if (t->cols != 1) {
+        api->raise("oneHot needs a one-column table (use column(n) first)", "ArgumentError");
+        return 0;
+    }
+    for (int i = 0; i < t->rows; i++) {
+        real v = t->values[i];
+        if (v < 0 || v >= (real)classes || v != (real)(int)v) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "oneHot: row %d has label %g, not a whole number below %d",
+                     i, (double)v, classes);
+            api->raise(msg, "ArgumentError");
+            return 0;
+        }
+    }
+    return data_wrap(tensor_onehot(t, classes));
+}
+
+/* data scale(divisor) -> a copy with every value divided by divisor, e.g. 255 for pixels */
+static ClayPluginValue data_scale(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PTensor t = self_tensor(self, "scale");
+    if (!t) return 0;
+    if (argc < 1 || !(api->is_int(argv[0]) || api->is_float(argv[0])) || api->to_float(argv[0]) == 0) {
+        api->raise("scale needs a non-zero number to divide by", "ArgumentError");
+        return 0;
+    }
+    real d = api->to_float(argv[0]);
+    PTensor r = tensor_copy(t);
+    if (r) {
+        size_t n = (size_t)r->rows * (size_t)r->cols;
+        for (size_t i = 0; i < n; i++) r->values[i] /= d;
+    }
+    return data_wrap(r);
+}
+
+/* data row(i) -> row i as an Array */
+static ClayPluginValue data_row(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PTensor t = self_tensor(self, "row");
+    if (!t) return 0;
+    if (argc < 1 || !api->is_int(argv[0]) || api->to_int(argv[0]) < 0 || api->to_int(argv[0]) >= t->rows) {
+        api->raise("row: position out of range", "ArgumentError");
+        return 0;
+    }
+    return api->from_floats(t->values + (size_t)api->to_int(argv[0]) * t->cols, (size_t)t->cols, 0);
+}
+
+/* data toArray -> an Array of rows (boxes every value: avoid on big tables) */
+static ClayPluginValue data_to_array(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    PTensor t = self_tensor(self, "toArray");
+    if (!t) return 0;
+    return api->from_floats(t->values, (size_t)t->rows * (size_t)t->cols, (size_t)t->cols);
+}
+
+static ClayPluginMethod data_methods[] = {
+    { "loadCsv", data_load_csv },   { "rows", data_rows },
+    { "cols", data_cols },          { "slice", data_slice },
+    { "columns", data_columns },    { "column", data_column },
+    { "oneHot", data_one_hot },     { "scale", data_scale },
+    { "row", data_row },            { "toArray", data_to_array },
+    { NULL, NULL }
+};
+
 static ClayPluginMethod methods[] = {
     { "create", net_create },       { "addLayer", net_add_layer },
     { "input", net_input },         { "dense", net_dense },
@@ -299,4 +514,8 @@ CLAY_PLUGIN_EXPORT void ann_plugin_init(const ClayPluginAPI *clay_api) {
     ann_set_error_log_callback(quiet_errors);
     ClayPluginType def = { "AnnNet", methods, net_free, sizeof(void *) };
     api->register_type(&def);
+
+    ClayPluginType data_def = { "AnnData", data_methods, data_free, sizeof(void *) };
+    data_proto = api->register_type(&data_def);
+    api->set_slot(data_proto, "_annData", api->make_bool(1));
 }

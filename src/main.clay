@@ -31,6 +31,7 @@
 //     classify(row)              -> the index of the largest output
 //     accuracy(inputs, targets)  -> the fraction classified correctly, 0 to 1
 //     evaluate(inputs, targets)  -> the loss over the data
+//     (inputs and targets are Arrays of rows, or AnnData tables: see Ann loadCsv)
 //     sizes                      -> the layer sizes, e.g. [2, 4, 1]
 //     save(path)                 writes the network (Ann load(path) reads it)
 //
@@ -59,6 +60,14 @@ Ann = Object clone {
 
     // Make weight initialization (and so training) repeatable
     seed(n) { AnnNet seed(n) }
+
+    // The numbers in a CSV file, as an AnnData table kept in C (fast, and
+    // far smaller than Arrays of rows: use it for big sets like MNIST).
+    // Every value must be a number; pass true to skip a header line.
+    //   data = Ann loadCsv("mnist_train.csv", true)
+    //   labels = data column(0) ; pixels = (data columns(1)) scale(255)
+    // train, accuracy and evaluate take AnnData tables wherever they take Arrays.
+    loadCsv(path, header = false) { AnnData loadCsv(path, header) }
 
     // One-hot rows: oneHot([2, 0], 3) -> [[0, 0, 1], [1, 0, 0]]
     oneHot(labels, classes) {
