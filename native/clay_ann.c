@@ -110,6 +110,13 @@ static int output_size(PNetwork n) { return n->layer_count > 0 ? n->layers[n->la
 
 /* --- AnnNet ------------------------------------------------------------ */
 
+/* libann prints its training report with fputs(stdout), which a debug
+ * session loses; send it where Clay's own output goes instead */
+static void net_print(const char *text) {
+    if (api->api_version >= 3) api->write_output(text);
+    else fputs(text, stdout);
+}
+
 /* AnnNet create(optimizer, loss) -> a new, empty network */
 static ClayPluginValue net_create(ClayPluginObject self, int argc, ClayPluginValue *argv) {
     const char *opt = str_arg(argc, argv, 0, "adam");
@@ -129,6 +136,7 @@ static ClayPluginValue net_create(ClayPluginObject self, int argc, ClayPluginVal
 
     PNetwork n = ann_make_network(o, l);
     if (!n) { api->raise("ann: cannot create a network", "RuntimeError"); return 0; }
+    ann_set_print_function(n, net_print);
     ClayPluginObject obj = api->clone(self);
     api->set_data(obj, n);
     return (ClayPluginValue)obj;
@@ -293,6 +301,7 @@ static ClayPluginValue net_load(ClayPluginObject self, int argc, ClayPluginValue
     if (!path) { api->raise("load needs a file path", "ArgumentError"); return 0; }
     PNetwork n = ann_load_network(path);
     if (!n) { api->raise("ann: cannot load the network", "RuntimeError"); return 0; }
+    ann_set_print_function(n, net_print);
     ClayPluginObject obj = api->clone(self);
     api->set_data(obj, n);
     return (ClayPluginValue)obj;
