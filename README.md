@@ -103,6 +103,80 @@ classes)` turns class numbers into target rows: `Ann oneHot([2, 0], 3)` is
 Mistakes such as the wrong number of inputs, ragged rows or an unknown activation raise a Clay
 `ArgumentError`. Numbers are 32-bit floats, as everywhere in Clay and libann.
 
+## Saving, exporting and quantizing
+
+| Method | |
+|--------|---|
+| `save(path)` / `Ann load(path)` | libann's text format (readable) |
+| `saveBinary(path)` / `Ann loadBinary(path)` | the compact binary format: smaller and faster for big networks |
+| `exportOnnx(path)` / `Ann importOnnx(path)` | ONNX JSON, to move a dense network to or from other tools |
+| `exportC(path, prefix)` | the float32 network as a C header for embedded targets; `prefix` (default `"model"`) names its functions, e.g. `model_predict` |
+| `exportJs(path)` | the float32 network as a JavaScript module for the browser or Node |
+| `diagram(path)` | the layers as a [pikchr](https://pikchr.org) diagram |
+| `quantize(inputs)` | an int8 copy of the network (an `AnnQuant`), its value ranges found by running `inputs` (a few hundred training rows are enough) |
+
+An `AnnQuant` has `predict(row)`, `classify(row)`, `accuracy(inputs, targets)`, `ioParams`
+(`[inputScale, inputZeroPoint, outputScale, outputZeroPoint]`) and `exportC(path, prefix)`, which
+writes the integer-only version for targets without an FPU:
+
+```clay
+q = net quantize(x slice(0, 500))
+Console println("float ${net accuracy(xTest, yTest)}  int8 ${q accuracy(xTest, yTest)}")
+q exportC("model_q.h", "model")
+```
+
+An exported header or module needs libann's small runtime beside it: copy `ann_rt.h` (for C) or
+`ann_rt.js` (for JavaScript) from the brick's `native/libann/` directory. Both exports use the
+same weights as `predict`, so the outputs match. The C header's `model_predict(input, output,
+workspace)` takes a `float workspace[MODEL_WORKSPACE_SIZE]`.
+
+## Training from Clay: `fit` and the step methods
+
+`train` runs all the epochs inside libann. `fit` runs them one at a time from Clay, so a block can
+watch the training or stop it:
+
+```clay
+history = net fit(x, y, #{
+    "epochs": 30, "batchSize": 64,
+    "validation": [xTest, yTest], "patience": 3,
+    "lrSchedule": ["cosine", 30, 0.0001],
+    "onEpoch": { |e|
+        epoch = e get("epoch")
+        loss = e get("loss")
+        val = e get("valLoss")
+        Console println("epoch ${epoch}: loss ${loss} validation ${val}")
+    }
+})
+```
+
+(Compute the values first: a double quote inside `"${...}"` ends the string in Clay.)
+
+| Option | |
+|--------|---|
+| `epochs` | passes over the data (default 10) |
+| `batchSize` | rows per weight update (default: the network's) |
+| `shuffle` | `false` keeps the rows in order; by default each epoch uses a new random order |
+| `validation` | `[inputs, targets]` held out; their loss is measured after each epoch |
+| `lrSchedule` | the same forms as the `network` option, applied per epoch |
+| `patience`, `minDelta` | stop after `patience` epochs without the loss (the validation loss, if there is one) improving by more than `minDelta` |
+| `onEpoch` | a block called after each epoch with a Dict of `epoch`, `loss`, `valLoss` (-1 without validation data) and `lr`; returning `false` stops the training |
+
+`fit` returns the history, one such Dict per epoch, and puts the learning rate back as it was.
+Unlike `train`, it does not restore the best weights when it stops early.
+
+The pieces are available directly, for custom batching, streaming data or several networks in
+step:
+
+| Method | |
+|--------|---|
+| `trainEpoch(inputs, targets, batchSize, shuffle)` | one pass in mini-batches; returns the mean loss |
+| `trainBegin`, `trainStep(inputs, targets)`, `trainEnd` | an online session: `trainStep` updates the weights on one mini-batch of any size and returns its loss |
+| `learningRate`, `learningRate(r)` | read or set the learning rate |
+| `Ann scheduledRate(spec, base, epoch)` | the rate a schedule gives an epoch |
+
+Optimizer state (such as Adam's moments) carries over between steps and epochs. These methods use
+the CPU; dropout and input noise apply while a session or epoch runs.
+
 ## Large data: `Ann loadCsv`
 
 An Array of rows boxes every number, so a data set like MNIST (60,000 rows of 785 values) is slow

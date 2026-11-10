@@ -40,8 +40,18 @@
 //     confusionMatrix(inputs, targets) -> counts, matrix[actual][predicted]
 //     epochsTrained, bestEpoch, history (rows of [loss, rate, validation loss]),
 //     clearHistory, learningCurve(path)
+//     fit(inputs, targets, options) -> train epoch by epoch with an onEpoch block (see below)
+//     trainEpoch(inputs, targets, batchSize, shuffle), trainBegin, trainStep(inputs, targets),
+//     trainEnd, learningRate (reads it)
 //     sizes                      -> the layer sizes, e.g. [2, 4, 1]
 //     save(path)                 writes the network (Ann load(path) reads it)
+//     saveBinary(path)           the compact binary form (Ann loadBinary(path))
+//     exportOnnx(path)           ONNX JSON for other tools (Ann importOnnx(path))
+//     exportC(path, prefix)      a C header for embedded targets (float32)
+//     exportJs(path)             a JavaScript module
+//     diagram(path)              a pikchr diagram of the layers
+//     quantize(inputs)           an int8 copy (an AnnQuant): predict(row), classify(row),
+//                                accuracy(inputs, targets), exportC(path, prefix), ioParams
 //
 // Mistakes (wrong input count, ragged rows, unknown names) raise ArgumentError.
 // `(Ann network) methods` lists them at run time too (with Object's own).
@@ -117,6 +127,12 @@ Ann = Object clone {
     // libann's version, e.g. "0.10.0"
     version() { AnnNet version }
 
+    // A network saved with net saveBinary(path) (smaller and faster to load than save's text)
+    loadBinary(path) { AnnNet loadBinary(path) }
+
+    // A network exported with net exportOnnx(path) (ONNX JSON; dense layers only)
+    importOnnx(path) { AnnNet importOnnx(path) }
+
     // A network saved with net save(path)
     load(path) { AnnNet load(path) }
 
@@ -131,6 +147,25 @@ Ann = Object clone {
     // train, accuracy and evaluate take AnnData tables wherever they take Arrays.
     loadCsv(path, header = false) { AnnData loadCsv(path, header) }
 
+    // The learning rate a schedule gives an epoch (1, 2, ...), starting from base: spec is
+    // ["step", stepSize, gamma], ["exponential", gamma], ["cosine", tMax, minLr] or ["none"],
+    // as in Ann network's lrSchedule option. net fit uses it per epoch.
+    scheduledRate(spec, base, epoch) {
+        kind = spec at(0)
+        (kind == "step") ifTrue {
+            ((spec at(1)) <= 0) ifTrue { return base }
+            return base * (Math pow(spec at(2), (epoch - 1) / (spec at(1))))
+        }
+        (kind == "exponential") ifTrue { return base * (Math pow(spec at(1), epoch - 1)) }
+        (kind == "cosine") ifTrue {
+            low = (spec size > 2) ifTrue { spec at(2) } ifFalse { 0 }
+            ((spec at(1)) <= 0) ifTrue { return base }
+            (epoch >= (spec at(1))) ifTrue { return low }
+            return low + (base - low) * (1 + (Math cos(Math pi * epoch / (spec at(1))))) / 2
+        }
+        base
+    }
+
     // One-hot rows: oneHot([2, 0], 3) -> [[0, 0, 1], [1, 0, 0]]
     oneHot(labels, classes) {
         labels map { |k|
@@ -141,3 +176,55 @@ Ann = Object clone {
         }
     }
 }
+
+// net fit(inputs, targets, options): train epoch by epoch from Clay, so a block can watch
+// the training or stop it. Inputs and targets are Arrays of rows or AnnData tables.
+// Options (all optional):
+//   epochs: how many passes (default 10)
+//   batchSize: rows per update (default: the network's)
+//   shuffle: false keeps the rows in order (default: a new random order each epoch)
+//   validation: [inputs, targets] held out; its loss is measured after each epoch
+//   lrSchedule: ["step", stepSize, gamma], ["exponential", gamma] or ["cosine", tMax, minLr]
+//   patience: stop after this many epochs without the loss (the validation loss, if there is
+//     one) improving by more than minDelta (default 0)
+//   onEpoch: a block called after each epoch with a Dict of epoch, loss, valLoss (-1 without
+//     validation data) and lr; it stops the training by returning false
+// Returns the history: an Array with one such Dict per epoch. The learning rate is back to
+// what it was when fit returns. Unlike train, fit does not restore the best weights.
+AnnNet setMethod("fit", { |x, y, options|
+    net = self
+    o = options ?? #{}
+    epochs = (o get("epochs")) ?? 10
+    batch = o get("batchSize")
+    shuffle = ((o get("shuffle")) == false) ifTrue { false } ifFalse { true }
+    valid = o get("validation")
+    schedule = o get("lrSchedule")
+    patience = (o get("patience")) ?? 0
+    minDelta = (o get("minDelta")) ?? 0
+    onEpoch = o get("onEpoch")
+    base = net learningRate
+    history = []
+    best = nil
+    stale = 0
+    epoch = 1
+    running = epochs > 0
+    { running } whileTrue {
+        (schedule != nil) ifTrue { net learningRate(Ann scheduledRate(schedule, base, epoch)) }
+        loss = net trainEpoch(x, y, batch, shuffle)
+        val = (valid == nil) ifTrue { -1 } ifFalse { net evaluate(valid at(0), valid at(1)) }
+        entry = #{"epoch": epoch, "loss": loss, "valLoss": val, "lr": net learningRate}
+        history push(entry)
+        (onEpoch != nil) ifTrue {
+            ((onEpoch value(entry)) == false) ifTrue { running = false }
+        }
+        (patience > 0) ifTrue {
+            seen = (valid == nil) ifTrue { loss } ifFalse { val }
+            ((best == nil) || (seen < best - minDelta)) ifTrue { best = seen; stale = 0 } ifFalse { stale = stale + 1 }
+            (stale >= patience) ifTrue { running = false }
+        }
+        epoch = epoch + 1
+        (epoch > epochs) ifTrue { running = false }
+    }
+    net learningRate(base)
+    history
+})

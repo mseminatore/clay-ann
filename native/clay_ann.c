@@ -53,6 +53,13 @@ static const char *str_arg(int argc, ClayPluginValue *argv, int i, const char *d
     return api->to_string(argv[i]);
 }
 
+/* raise a Clay error for a libann error code from a file or export function */
+static void raise_code(const char *who, int code, const char *what) {
+    char msg[256];
+    snprintf(msg, sizeof(msg), "%s: %s (%s)", who, what, ann_strerror(code));
+    api->raise(msg, code == ERR_INVALID || code == ERR_NULL_PTR ? "ArgumentError" : "RuntimeError");
+}
+
 static int activation_of(const char *s, Activation_type *out) {
     static const struct { const char *name; Activation_type a; } map[] = {
         {"none", ACTIVATION_NULL}, {"linear", ACTIVATION_NULL}, {"sigmoid", ACTIVATION_SIGMOID},
@@ -216,7 +223,11 @@ static ClayPluginValue net_train(ClayPluginObject self, int argc, ClayPluginValu
     PTensor x = tensor_arg(argv[0], "inputs", &xo);
     PTensor y = tensor_arg(argv[1], "targets", &yo);
     char msg[160] = "";
-    if (x->rows != y->rows)
+    if (n->loss_type == LOSS_CATEGORICAL_CROSS_ENTROPY && n->layer_count > 0 &&
+        n->layers[n->layer_count - 1].activation != ACTIVATION_SOFTMAX &&
+        n->layers[n->layer_count - 1].activation != ACTIVATION_SIGMOID)
+        snprintf(msg, sizeof(msg), "train: cross_entropy needs a softmax or sigmoid output layer");
+    else if (x->rows != y->rows)
         snprintf(msg, sizeof(msg), "train: inputs and targets need the same number of rows");
     else if (x->cols != input_size(n) || y->cols != output_size(n))
         snprintf(msg, sizeof(msg), "train: rows must have %d inputs and %d targets (got %d and %d)",
@@ -282,10 +293,7 @@ static ClayPluginValue net_accuracy(ClayPluginObject s, int c, ClayPluginValue *
 static ClayPluginValue net_evaluate(ClayPluginObject s, int c, ClayPluginValue *v) { return net_score(s, c, v, 1); }
 
 /* settings: each returns the network, so they chain */
-static ClayPluginValue net_set_rate(ClayPluginObject self, int argc, ClayPluginValue *argv) {
-    if (argc > 0) ann_set_learning_rate(net_of(self, "learningRate"), api->to_float(argv[0]));
-    return (ClayPluginValue)self;
-}
+
 static ClayPluginValue net_set_epochs(ClayPluginObject self, int argc, ClayPluginValue *argv) {
     if (argc > 0) ann_set_epoch_limit(net_of(self, "epochs"), (unsigned)api->to_int(argv[0]));
     return (ClayPluginValue)self;
@@ -362,6 +370,14 @@ static real real_arg(const char *who, int argc, ClayPluginValue *argv, int i) {
         return 0;
     }
     return api->to_float(argv[i]);
+}
+
+/* net learningRate(r) sets it (and returns the network); net learningRate reads it */
+static ClayPluginValue net_set_rate(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "learningRate");
+    if (argc == 0) return api->make_float(n->learning_rate);
+    ann_set_learning_rate(n, real_arg("learningRate", argc, argv, 0));
+    return (ClayPluginValue)self;
 }
 
 static ClayPluginValue net_set_weight_decay(ClayPluginObject self, int argc, ClayPluginValue *argv) {
@@ -548,6 +564,117 @@ static ClayPluginValue net_learning_curve(ClayPluginObject self, int argc, ClayP
     return (ClayPluginValue)self;
 }
 
+/* --- training loops driven from Clay -------------------------------------- */
+
+/* the rows of a batch (x and y) as a checked pair of tensors; on a mismatch frees what it
+ * made, raises, and returns 0 */
+static int pair_args(PNetwork n, const char *who, int argc, ClayPluginValue *argv,
+                     PTensor *x, PTensor *y, int *xo, int *yo) {
+    if (argc < 2) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s needs inputs and targets", who);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    *x = tensor_arg(argv[0], "inputs", xo);
+    *y = tensor_arg(argv[1], "targets", yo);
+    char msg[160] = "";
+    if ((*x)->rows != (*y)->rows)
+        snprintf(msg, sizeof(msg), "%s: inputs and targets need the same number of rows", who);
+    else if ((*x)->cols != input_size(n) || (*y)->cols != output_size(n))
+        snprintf(msg, sizeof(msg), "%s: rows must have %d inputs and %d targets (got %d and %d)",
+                 who, input_size(n), output_size(n), (*x)->cols, (*y)->cols);
+    if (msg[0]) {
+        if (*xo) tensor_free(*x);
+        if (*yo) tensor_free(*y);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    return 1;
+}
+
+/* net trainBegin: start an online session (dropout on, optimizer state kept) */
+static ClayPluginValue net_train_begin(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    PNetwork n = net_of(self, "trainBegin");
+    int rc = ann_train_begin(n);
+    if (rc != ERR_OK) { raise_code("trainBegin", rc, "cannot start (add layers first; cross_entropy needs a softmax or sigmoid output layer)"); return 0; }
+    return (ClayPluginValue)self;
+}
+
+/* net trainStep(inputs, targets) -> the loss of this one mini-batch (any number of rows),
+ * between trainBegin and trainEnd */
+static ClayPluginValue net_train_step(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "trainStep");
+    PTensor x, y;
+    int xo, yo;
+    if (!pair_args(n, "trainStep", argc, argv, &x, &y, &xo, &yo)) return 0;
+    real loss = ann_train_step(n, x->values, y->values, x->rows);
+    if (xo) tensor_free(x);
+    if (yo) tensor_free(y);
+    return api->make_float(loss);
+}
+
+/* net trainEnd: end the online session (dropout off); the network is ready for predict */
+static ClayPluginValue net_train_end(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    ann_train_end(net_of(self, "trainEnd"));
+    return (ClayPluginValue)self;
+}
+
+/* net trainEpoch(inputs, targets, batchSize = the network's, shuffle = true) -> the mean
+ * loss over one pass through the data in mini-batches, in a random order unless shuffle
+ * is false (repeatable after Ann seed) */
+static ClayPluginValue net_train_epoch(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "trainEpoch");
+    PTensor x, y;
+    int xo, yo;
+    if (!pair_args(n, "trainEpoch", argc, argv, &x, &y, &xo, &yo)) return 0;
+    int batch = n->batchSize > 0 ? (int)n->batchSize : 32;
+    if (argc > 2 && !api->is_nil(argv[2])) {
+        if (!api->is_int(argv[2]) || api->to_int(argv[2]) < 1) {
+            if (xo) tensor_free(x);
+            if (yo) tensor_free(y);
+            api->raise("trainEpoch: batchSize must be at least 1", "ArgumentError");
+            return 0;
+        }
+        batch = (int)api->to_int(argv[2]);
+    }
+    int shuffle = !(argc > 3 && !api->is_nil(argv[3]) && argv[3] == api->make_bool(0));
+    if (batch > x->rows) batch = x->rows;
+
+    int in = x->cols, out = y->cols, rows = x->rows;
+    int *order = (int *)malloc((size_t)rows * sizeof(int));
+    real *bx = (real *)malloc((size_t)batch * in * sizeof(real));
+    real *by = (real *)malloc((size_t)batch * out * sizeof(real));
+    int rc = ERR_ALLOC;
+    double total = 0;
+    int batches = 0;
+    if (order && bx && by) {
+        for (int i = 0; i < rows; i++) order[i] = i;
+        for (int i = rows - 1; shuffle && i > 0; i--) {
+            int j = rand() % (i + 1);
+            int t = order[i]; order[i] = order[j]; order[j] = t;
+        }
+        rc = ann_train_begin(n);
+        for (int start = 0; rc == ERR_OK && start < rows; start += batch) {
+            int m = rows - start < batch ? rows - start : batch;
+            for (int k = 0; k < m; k++) {
+                memcpy(bx + (size_t)k * in, x->values + (size_t)order[start + k] * in, (size_t)in * sizeof(real));
+                memcpy(by + (size_t)k * out, y->values + (size_t)order[start + k] * out, (size_t)out * sizeof(real));
+            }
+            total += ann_train_step(n, bx, by, m);
+            batches++;
+        }
+        if (rc == ERR_OK) ann_train_end(n);
+    }
+    free(order); free(bx); free(by);
+    if (xo) tensor_free(x);
+    if (yo) tensor_free(y);
+    if (rc != ERR_OK) { raise_code("trainEpoch", rc, "cannot train (cross_entropy needs a softmax or sigmoid output layer)"); return 0; }
+    return api->make_float((float)(total / batches));
+}
+
 /* --- evaluation ---------------------------------------------------------- */
 
 /* the outputs for every row of x (an AnnData or an Array of rows): a rows x outputs tensor */
@@ -698,6 +825,210 @@ static ClayPluginValue net_version(ClayPluginObject self, int argc, ClayPluginVa
     (void)self; (void)argc; (void)argv;
     return api->make_string(ann_get_version());
 }
+
+/* --- saving, exporting and quantizing ------------------------------------ */
+
+static const char *path_arg(const char *who, int argc, ClayPluginValue *argv) {
+    const char *path = str_arg(argc, argv, 0, NULL);
+    if (!path) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s needs a file path", who);
+        api->raise(msg, "ArgumentError");
+    }
+    return path;
+}
+
+/* net saveBinary(path) / AnnNet loadBinary(path): libann's compact binary format */
+static ClayPluginValue net_save_binary(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "saveBinary");
+    const char *path = path_arg("saveBinary", argc, argv);
+    int rc = ann_save_network_binary(n, path);
+    if (rc != ERR_OK) { raise_code("saveBinary", rc, "cannot write the network"); return 0; }
+    return (ClayPluginValue)self;
+}
+
+static ClayPluginValue net_load_binary(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    const char *path = path_arg("loadBinary", argc, argv);
+    PNetwork n = ann_load_network_binary(path);
+    if (!n) { api->raise("loadBinary: cannot load the network (is it a binary network file?)", "RuntimeError"); return 0; }
+    ann_set_print_function(n, net_print);
+    return net_wrap(self, n);
+}
+
+/* net exportOnnx(path) / AnnNet importOnnx(path): ONNX JSON, for dense networks */
+static ClayPluginValue net_export_onnx(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "exportOnnx");
+    const char *path = path_arg("exportOnnx", argc, argv);
+    int rc = ann_export_onnx(n, path);
+    if (rc != ERR_OK) { raise_code("exportOnnx", rc, "cannot export (dense layers with common activations only)"); return 0; }
+    return (ClayPluginValue)self;
+}
+
+static ClayPluginValue net_import_onnx(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    const char *path = path_arg("importOnnx", argc, argv);
+    PNetwork n = ann_import_onnx(path);
+    if (!n) { api->raise("importOnnx: cannot import (an ONNX JSON file from exportOnnx, dense layers only)", "RuntimeError"); return 0; }
+    ann_set_print_function(n, net_print);
+    return net_wrap(self, n);
+}
+
+/* net exportC(path, prefix = "model"): the float32 network as a C header for embedded targets */
+static ClayPluginValue net_export_c(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "exportC");
+    const char *path = path_arg("exportC", argc, argv);
+    int rc = ann_export_c_header(n, NULL, path, str_arg(argc, argv, 1, "model"));
+    if (rc != ERR_OK) { raise_code("exportC", rc, "cannot export (the prefix must be a C identifier)"); return 0; }
+    return (ClayPluginValue)self;
+}
+
+/* net exportJs(path): the float32 network as a JavaScript module */
+static ClayPluginValue net_export_js(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "exportJs");
+    const char *path = path_arg("exportJs", argc, argv);
+    int rc = ann_export_js(n, path);
+    if (rc != ERR_OK) { raise_code("exportJs", rc, "cannot export"); return 0; }
+    return (ClayPluginValue)self;
+}
+
+/* net diagram(path): the layers as a pikchr diagram (render with the pikchr tool) */
+static ClayPluginValue net_diagram(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "diagram");
+    const char *path = path_arg("diagram", argc, argv);
+    int rc = ann_export_pikchr(n, path);
+    if (rc != ERR_OK) { raise_code("diagram", rc, "cannot write the diagram"); return 0; }
+    return (ClayPluginValue)self;
+}
+
+/* AnnQuant: an int8 copy of a network (see net quantize) */
+typedef struct { PQuantizedNetwork q; int in, out; } QuantData;
+
+static ClayPluginObject quant_proto;
+
+static void quant_free(void *data) {
+    QuantData *d = (QuantData *)data;
+    if (!d) return;
+    ann_free_quantized(d->q);
+    free(d);
+}
+
+static QuantData *quant_of(ClayPluginObject self, const char *who) {
+    QuantData *d = (QuantData *)api->get_data(self);
+    if (!d) {
+        char msg[112];
+        snprintf(msg, sizeof(msg), "%s: not an int8 network (make one with net quantize)", who);
+        api->raise(msg, "RuntimeError");
+    }
+    return d;
+}
+
+/* net quantize(calibrationInputs) -> an int8 copy, its ranges found by running these rows
+ * (a few hundred training rows are usually enough) */
+static ClayPluginValue net_quantize(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "quantize");
+    if (argc < 1) { api->raise("quantize needs calibration inputs", "ArgumentError"); return 0; }
+    int xo;
+    PTensor x = tensor_arg(argv[0], "calibration inputs", &xo);
+    PQuantizedNetwork q = NULL;
+    if (x->cols != input_size(n)) {
+        if (xo) tensor_free(x);
+        api->raise("quantize: calibration rows must have the network's number of inputs", "ArgumentError");
+        return 0;
+    }
+    q = ann_quantize(n, x);
+    if (xo) tensor_free(x);
+    if (!q) { api->raise("quantize: this network can't be quantized (see libann's docs/C_EXPORT.md)", "ArgumentError"); return 0; }
+    QuantData *d = (QuantData *)calloc(1, sizeof(QuantData));
+    if (!d) { ann_free_quantized(q); api->raise("ann: out of memory", "RuntimeError"); return 0; }
+    d->q = q;
+    d->in = input_size(n);
+    d->out = output_size(n);
+    ClayPluginObject obj = api->clone(quant_proto);
+    api->set_data(obj, d);
+    return (ClayPluginValue)obj;
+}
+
+/* q predict(row) -> the outputs, an Array */
+static ClayPluginValue quant_predict(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    QuantData *d = quant_of(self, "predict");
+    if (argc < 1 || (int)api->to_floats(argv[0], NULL, 0) != d->in) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "predict needs %d inputs", d->in);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    real *x = (real *)malloc((size_t)d->in * sizeof(real));
+    real *y = (real *)malloc((size_t)d->out * sizeof(real));
+    api->to_floats(argv[0], x, (size_t)d->in);
+    int rc = ann_quantized_predict(d->q, x, y);
+    ClayPluginValue r = rc == ERR_OK ? api->from_floats(y, (size_t)d->out, 0) : 0;
+    free(x);
+    free(y);
+    if (rc != ERR_OK) { api->raise("predict failed", "RuntimeError"); return 0; }
+    return r;
+}
+
+/* q classify(row) -> the index of the largest output */
+static ClayPluginValue quant_classify(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    QuantData *d = quant_of(self, "classify");
+    if (argc < 1 || (int)api->to_floats(argv[0], NULL, 0) != d->in) {
+        api->raise("classify: wrong number of inputs", "ArgumentError");
+        return 0;
+    }
+    real *x = (real *)malloc((size_t)d->in * sizeof(real));
+    real *y = (real *)malloc((size_t)d->out * sizeof(real));
+    api->to_floats(argv[0], x, (size_t)d->in);
+    int rc = ann_quantized_predict(d->q, x, y);
+    int k = rc == ERR_OK ? ann_class_prediction(y, d->out) : -1;
+    free(x);
+    free(y);
+    if (rc != ERR_OK) { api->raise("classify failed", "RuntimeError"); return 0; }
+    return api->make_int(k);
+}
+
+/* q accuracy(inputs, targets) -> the fraction classified correctly, 0 to 1 */
+static ClayPluginValue quant_accuracy(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    QuantData *d = quant_of(self, "accuracy");
+    if (argc < 2) { api->raise("accuracy needs inputs and targets", "ArgumentError"); return 0; }
+    int xo, yo;
+    PTensor x = tensor_arg(argv[0], "inputs", &xo);
+    PTensor y = tensor_arg(argv[1], "targets", &yo);
+    real v = (x->rows == y->rows && x->cols == d->in && y->cols == d->out)
+                 ? ann_quantized_evaluate_accuracy(d->q, x, y) : -1;
+    if (xo) tensor_free(x);
+    if (yo) tensor_free(y);
+    if (v < 0) { api->raise("accuracy: inputs and targets must match the network's inputs and outputs", "ArgumentError"); return 0; }
+    return api->make_float(v);
+}
+
+/* q exportC(path, prefix = "model"): the int8 network as a C header (needs ann_rt.h beside it) */
+static ClayPluginValue quant_export_c(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    QuantData *d = quant_of(self, "exportC");
+    const char *path = path_arg("exportC", argc, argv);
+    int rc = ann_export_c_header(NULL, d->q, path, str_arg(argc, argv, 1, "model"));
+    if (rc != ERR_OK) { raise_code("exportC", rc, "cannot export (the prefix must be a C identifier)"); return 0; }
+    return (ClayPluginValue)self;
+}
+
+/* q ioParams -> [inputScale, inputZeroPoint, outputScale, outputZeroPoint]: real = scale * (int8 - zeroPoint) */
+static ClayPluginValue quant_io(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    QuantData *d = quant_of(self, "ioParams");
+    real is, os;
+    int iz, oz;
+    if (ann_quantized_get_io_params(d->q, &is, &iz, &os, &oz) != ERR_OK) {
+        api->raise("ioParams failed", "RuntimeError");
+        return 0;
+    }
+    float v[4] = { is, (float)iz, os, (float)oz };
+    return api->from_floats(v, 4, 0);
+}
+
+static ClayPluginMethod quant_methods[] = {
+    { "predict", quant_predict },   { "classify", quant_classify },
+    { "accuracy", quant_accuracy }, { "exportC", quant_export_c },
+    { "ioParams", quant_io },
+    { NULL, NULL }
+};
 
 /* --- AnnData methods ---------------------------------------------------- */
 
@@ -1027,6 +1358,12 @@ static ClayPluginMethod methods[] = {
     { "predictBatch", net_predict_batch },   { "classifyBatch", net_classify_batch },
     { "confusionMatrix", net_confusion },    { "backendInfo", net_backend_info },
     { "threads", net_threads },              { "version", net_version },
+    { "trainBegin", net_train_begin },       { "trainStep", net_train_step },
+    { "trainEnd", net_train_end },           { "trainEpoch", net_train_epoch },
+    { "saveBinary", net_save_binary },       { "loadBinary", net_load_binary },
+    { "exportOnnx", net_export_onnx },       { "importOnnx", net_import_onnx },
+    { "exportC", net_export_c },             { "exportJs", net_export_js },
+    { "diagram", net_diagram },              { "quantize", net_quantize },
     { NULL, NULL }
 };
 
@@ -1040,4 +1377,7 @@ CLAY_PLUGIN_EXPORT void ann_plugin_init(const ClayPluginAPI *clay_api) {
     ClayPluginType data_def = { "AnnData", data_methods, data_free, sizeof(void *) };
     data_proto = api->register_type(&data_def);
     api->set_slot(data_proto, "_annData", api->make_bool(1));
+
+    ClayPluginType quant_def = { "AnnQuant", quant_methods, quant_free, sizeof(void *) };
+    quant_proto = api->register_type(&quant_def);
 }

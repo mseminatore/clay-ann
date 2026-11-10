@@ -180,6 +180,109 @@ check value("backend", (info get("threads")) >= 1 && (info get("realBytes")) == 
 check value("threads", Ann threads == (info get("threads")))
 check value("version", (Ann version) length > 0)
 
+// saving and exporting
+edir = File tempDir
+bin = edir + "/net.nnb"
+net saveBinary(bin)
+bnet = Ann loadBinary(bin)
+check value("binary round trip", (bnet predict([1, 0])) == (net predict([1, 0])) && bnet sizes == [2, 4, 1])
+onnx = edir + "/net.onnx.json"
+net exportOnnx(onnx)
+onet = Ann importOnnx(onnx)
+check value("onnx round trip", onet sizes == [2, 4, 1] && (((onet predict([1, 0])) at(0)) - ((net predict([1, 0])) at(0))) abs < 0.0001)
+hdr = edir + "/model.h"
+net exportC(hdr, "xornet")
+check value("exportC writes a header", (File read(hdr)) contains("xornet_predict"))
+js = edir + "/model.js"
+net exportJs(js)
+check value("exportJs writes a module", File exists(js))
+pik = edir + "/net.pikchr"
+net diagram(pik)
+check value("diagram writes a file", File exists(pik))
+check value("bad C prefix", (raises value({ net exportC(hdr, "9 no") })) == "ArgumentError")
+check value("missing binary file", (raises value({ Ann loadBinary(edir + "/none.nnb") })) == "RuntimeError")
+check value("missing onnx file", (raises value({ Ann importOnnx(edir + "/none.json") })) == "RuntimeError")
+check value("saveBinary needs a path", (raises value({ net saveBinary })) == "ArgumentError")
+
+// int8 quantization
+q = cls quantize(feat)
+check value("quantized accuracy", (q accuracy(feat, labs oneHot(3))) > 0.9)
+check value("quantized predict", (q predict([1, 0, 0])) size == 3)
+check value("quantized classify", (q classify([0, 1, 0])) == 1)
+check value("ioParams", q ioParams size == 4)
+qhdr = edir + "/model_q.h"
+q exportC(qhdr, "qnet")
+check value("quantized exportC", (File read(qhdr)) contains("qnet_predict"))
+check value("quantize calibration width", (raises value({ cls quantize([[1, 2]]) })) == "ArgumentError")
+check value("quantized wrong input width", (raises value({ q predict([1, 2]) })) == "ArgumentError")
+File delete(bin)
+File delete(onnx)
+File delete(hdr)
+File delete(js)
+File delete(pik)
+File delete(qhdr)
+File delete(edir)
+
+// training loops driven from Clay
+Ann seed(2)
+lnet = Ann network(#{"learningRate": 0.5})
+lnet input(2)
+lnet dense(4, "sigmoid")
+lnet output(1, "sigmoid")
+check value("learningRate reads", lnet learningRate == 0.5)
+check value("learningRate sets and chains", ((lnet learningRate(0.25)) learningRate) == 0.25)
+lnet learningRate(0.5)
+first = lnet trainEpoch(xs, ys, 2)
+check value("trainEpoch returns the mean loss", first > 0)
+lnet trainBegin
+step1 = lnet trainStep(xs, ys)
+i = 0
+{ i < 400 } whileTrue { lnet trainStep(xs, ys); i = i + 1 }
+step2 = lnet trainStep(xs, ys)
+lnet trainEnd
+check value("trainStep learns", step2 < step1)
+check value("trainStep takes tables", (lnet trainEpoch(AnnData fromArray(xs), AnnData fromArray(ys), 4, false)) > 0)
+check value("trainEpoch width mismatch", (raises value({ lnet trainEpoch([[1]], [[1]]) })) == "ArgumentError")
+check value("trainEpoch batch size", (raises value({ lnet trainEpoch(xs, ys, 0) })) == "ArgumentError")
+check value("trainStep row mismatch", (raises value({ lnet trainStep(xs, [[1]]) })) == "ArgumentError")
+
+Ann seed(2)
+fnet = Ann network(#{"learningRate": 0.5})
+fnet input(2)
+fnet dense(4, "sigmoid")
+fnet output(1, "sigmoid")
+seen = []
+hist = fnet fit(xs, ys, #{"epochs": 4, "batchSize": 2, "lrSchedule": ["exponential", 0.5],
+                         "onEpoch": { |e| seen push(e get("epoch")) }})
+check value("fit history", hist size == 4 && seen == [1, 2, 3, 4])
+check value("fit entry", ((hist at(0)) get("loss")) > 0 && ((hist at(0)) get("valLoss")) == -1)
+check value("fit applies the schedule", ((hist at(0)) get("lr")) == 0.5 && ((hist at(2)) get("lr")) == 0.125)
+check value("fit restores the learning rate", fnet learningRate == 0.5)
+stopped = fnet fit(xs, ys, #{"epochs": 50, "onEpoch": { |e| (e get("epoch")) < 3 }})
+check value("onEpoch false stops", stopped size == 3)
+flat = fnet fit(xs, ys, #{"epochs": 100, "patience": 2, "minDelta": 1000})
+check value("patience stops when nothing improves enough", flat size == 3)
+valid = fnet fit(xs, ys, #{"epochs": 2, "validation": [xs, ys]})
+check value("fit measures validation loss", ((valid at(0)) get("valLoss")) >= 0)
+check value("fit without options", (fnet fit(xs, ys)) size == 10)
+check value("fit zero epochs", (fnet fit(xs, ys, #{"epochs": 0})) size == 0)
+Ann seed(4)
+xnet = Ann network(#{"learningRate": 0.5})
+xnet input(2)
+xnet dense(4, "sigmoid")
+xnet output(1, "sigmoid")
+xnet fit(xs, ys, #{"epochs": 3000, "batchSize": 4})
+check value("fit learns xor", ((xnet predict([0, 1])) at(0)) > 0.8 && ((xnet predict([1, 1])) at(0)) < 0.2)
+check value("scheduledRate step", (Ann scheduledRate(["step", 2, 0.5], 1, 3)) == 0.5)
+check value("scheduledRate cosine ends at the minimum", (Ann scheduledRate(["cosine", 10, 0.01], 1, 10)) == 0.01)
+check value("scheduledRate none", (Ann scheduledRate(["none"], 0.3, 7)) == 0.3)
+
+// a loss that doesn't fit the output layer is an error, not a quiet 0
+bad = Ann network(#{"loss": "cross_entropy", "quiet": true})
+bad input(2)
+bad output(2, "relu")
+check value("cross_entropy needs softmax or sigmoid", (raises value({ bad train([[0, 0]], [[1, 0]]) })) == "ArgumentError")
+
 // errors are Clay errors, not crashes
 check value("wrong input width", (raises value({ net predict([1, 2, 3]) })) == "ArgumentError")
 check value("ragged rows", (raises value({ net train([[1, 2], [3]], [[1], [0]]) })) == "ArgumentError")
