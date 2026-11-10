@@ -211,9 +211,277 @@ static ClayPluginValue layer_as(ClayPluginObject self, int argc, ClayPluginValue
     api->release(args[1]);
     return r;
 }
-static ClayPluginValue net_input(ClayPluginObject s, int c, ClayPluginValue *v)  { return layer_as(s, c, v, "input"); }
+
+/* net input(n): n values per sample. net input(channels, height, width): an image, its values
+ * channel by channel, row by row (what convolution and pooling layers need) */
+static ClayPluginValue net_input(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    if (argc >= 3 && api->is_int(argv[0]) && api->is_int(argv[1]) && api->is_int(argv[2])) {
+        PNetwork n = net_of(self, "input");
+        int rc = ann_add_input(n, (int)api->to_int(argv[0]), (int)api->to_int(argv[1]), (int)api->to_int(argv[2]));
+        if (rc != ERR_OK) { raise_code("input", rc, "bad shape, or the network already has layers"); return 0; }
+        return (ClayPluginValue)self;
+    }
+    return layer_as(self, argc, argv, "input");
+}
 static ClayPluginValue net_dense(ClayPluginObject s, int c, ClayPluginValue *v)  { return layer_as(s, c, v, "hidden"); }
 static ClayPluginValue net_output(ClayPluginObject s, int c, ClayPluginValue *v) { return layer_as(s, c, v, "output"); }
+
+/* --- image, sequence and other layers ------------------------------------ */
+
+static const char *activation_name(Activation_type a) {
+    switch (a) {
+    case ACTIVATION_SIGMOID: return "sigmoid";
+    case ACTIVATION_RELU: return "relu";
+    case ACTIVATION_LEAKY_RELU: return "leaky_relu";
+    case ACTIVATION_TANH: return "tanh";
+    case ACTIVATION_SOFTSIGN: return "softsign";
+    case ACTIVATION_SOFTMAX: return "softmax";
+    case ACTIVATION_GELU: return "gelu";
+    default: return "none";
+    }
+}
+
+/* argument i as an activation name (default dflt when absent or nil) */
+static int act_arg(const char *who, int argc, ClayPluginValue *argv, int i, const char *dflt, Activation_type *out) {
+    const char *name = dflt;
+    if (i < argc && !api->is_nil(argv[i])) {
+        if (!api->is_string(argv[i])) { name = ""; }
+        else name = api->to_string(argv[i]);
+    }
+    if (!activation_of(name, out)) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s: activation must be none, sigmoid, relu, leaky_relu, tanh, softsign or gelu", who);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    return 1;
+}
+
+/* argument i as a whole number >= min (a default when absent or nil, if has_default) */
+static int int_arg(const char *who, int argc, ClayPluginValue *argv, int i, int has_default, int dflt, int min, int *out) {
+    if (i >= argc || api->is_nil(argv[i])) {
+        if (has_default) { *out = dflt; return 1; }
+    } else if (api->is_int(argv[i]) && api->to_int(argv[i]) >= min) {
+        *out = (int)api->to_int(argv[i]);
+        return 1;
+    }
+    char msg[128];
+    snprintf(msg, sizeof(msg), "%s: argument %d must be a whole number of at least %d", who, i + 1, min);
+    api->raise(msg, "ArgumentError");
+    return 0;
+}
+
+/* argument i as a size: one number (height and width alike) or [height, width] */
+static int size_arg(const char *who, int argc, ClayPluginValue *argv, int i, int has_default, int dh, int dw, int *h, int *w) {
+    if (i >= argc || api->is_nil(argv[i])) {
+        if (has_default) { *h = dh; *w = dw; return 1; }
+    } else if (api->is_int(argv[i]) && api->to_int(argv[i]) >= 1) {
+        *h = *w = (int)api->to_int(argv[i]);
+        return 1;
+    } else if (api->is_array(argv[i]) && api->array_size(argv[i]) == 2) {
+        ClayPluginValue a = api->array_get(argv[i], 0), b = api->array_get(argv[i], 1);
+        if (api->is_int(a) && api->is_int(b) && api->to_int(a) >= 1 && api->to_int(b) >= 1) {
+            *h = (int)api->to_int(a);
+            *w = (int)api->to_int(b);
+            return 1;
+        }
+    }
+    char msg[128];
+    snprintf(msg, sizeof(msg), "%s: argument %d must be a size (a number, or [height, width])", who, i + 1);
+    api->raise(msg, "ArgumentError");
+    return 0;
+}
+
+/* argument i as padding: a number or [height, width] of zeros per side, "valid" (none, the
+ * default) or "same" (keeps the size at stride 1) */
+static int padding_arg(const char *who, int argc, ClayPluginValue *argv, int i, int kh, int kw, int *ph, int *pw) {
+    if (i >= argc || api->is_nil(argv[i])) { *ph = *pw = 0; return 1; }
+    if (api->is_string(argv[i])) {
+        const char *k = api->to_string(argv[i]);
+        if (str_eq(k, "valid")) { *ph = *pw = 0; return 1; }
+        if (str_eq(k, "same")) { *ph = (kh - 1) / 2; *pw = (kw - 1) / 2; return 1; }
+        char msg[128];
+        snprintf(msg, sizeof(msg), "%s: padding must be a number, \"valid\" or \"same\"", who);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    if (api->is_int(argv[i]) && api->to_int(argv[i]) >= 0) { *ph = *pw = (int)api->to_int(argv[i]); return 1; }
+    if (api->is_array(argv[i]) && api->array_size(argv[i]) == 2) {
+        ClayPluginValue a = api->array_get(argv[i], 0), b = api->array_get(argv[i], 1);
+        if (api->is_int(a) && api->is_int(b) && api->to_int(a) >= 0 && api->to_int(b) >= 0) {
+            *ph = (int)api->to_int(a);
+            *pw = (int)api->to_int(b);
+            return 1;
+        }
+    }
+    char msg[128];
+    snprintf(msg, sizeof(msg), "%s: padding must be a number, [height, width], \"valid\" or \"same\"", who);
+    api->raise(msg, "ArgumentError");
+    return 0;
+}
+
+static ClayPluginValue layer_added(ClayPluginObject self, const char *who, int rc) {
+    if (rc != ERR_OK) {
+        raise_code(who, rc, "can't add the layer: bad settings, no input layer yet, or a window that doesn't fit its input");
+        return 0;
+    }
+    return (ClayPluginValue)self;
+}
+
+/* net conv2d(filters, kernel, activation = "none", stride = 1, padding = "valid", groups = 1)
+ * kernel, stride and padding are a number or [height, width]; padding can be "same" */
+static ClayPluginValue net_conv2d(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "conv2d");
+    int filters, kh, kw, sh, sw, ph, pw, groups;
+    Activation_type act;
+    if (!int_arg("conv2d", argc, argv, 0, 0, 0, 1, &filters) ||
+        !size_arg("conv2d", argc, argv, 1, 0, 0, 0, &kh, &kw) ||
+        !act_arg("conv2d", argc, argv, 2, "none", &act) ||
+        !size_arg("conv2d", argc, argv, 3, 1, 1, 1, &sh, &sw) ||
+        !padding_arg("conv2d", argc, argv, 4, kh, kw, &ph, &pw) ||
+        !int_arg("conv2d", argc, argv, 5, 1, 1, 1, &groups)) return 0;
+    return layer_added(self, "conv2d", ann_add_conv2d_ex(n, filters, kh, kw, sh, sw, ph, pw, groups, act));
+}
+
+/* net depthwiseConv2d(multiplier = 1, kernel, activation = "none", stride = 1, padding = "valid"):
+ * each input channel gets its own filters, channels aren't mixed (follow with conv2d(n, 1) to mix) */
+static ClayPluginValue net_depthwise(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "depthwiseConv2d");
+    int mult, kh, kw, sh, sw, ph, pw, c = 0, h = 0, w = 0;
+    Activation_type act;
+    if (!int_arg("depthwiseConv2d", argc, argv, 0, 1, 1, 1, &mult) ||
+        !size_arg("depthwiseConv2d", argc, argv, 1, 0, 0, 0, &kh, &kw) ||
+        !act_arg("depthwiseConv2d", argc, argv, 2, "none", &act) ||
+        !size_arg("depthwiseConv2d", argc, argv, 3, 1, 1, 1, &sh, &sw) ||
+        !padding_arg("depthwiseConv2d", argc, argv, 4, kh, kw, &ph, &pw)) return 0;
+    if (n->layer_count < 1 || ann_get_layer_shape(n, n->layer_count - 1, &c, &h, &w) != ERR_OK || c < 1) {
+        api->raise("depthwiseConv2d: add an input layer first", "ArgumentError");
+        return 0;
+    }
+    return layer_added(self, "depthwiseConv2d", ann_add_conv2d_ex(n, c * mult, kh, kw, sh, sw, ph, pw, c, act));
+}
+
+/* net conv1d(filters, kernel, activation = "none", stride = 1, padding = "valid"): over
+ * sequences, an input(features, 1, length) or the output of an embedding */
+static ClayPluginValue net_conv1d(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "conv1d");
+    int filters, k, stride, ph, pw;
+    Activation_type act;
+    if (!int_arg("conv1d", argc, argv, 0, 0, 0, 1, &filters) ||
+        !int_arg("conv1d", argc, argv, 1, 0, 0, 1, &k) ||
+        !act_arg("conv1d", argc, argv, 2, "none", &act) ||
+        !int_arg("conv1d", argc, argv, 3, 1, 1, 1, &stride) ||
+        !padding_arg("conv1d", argc, argv, 4, 1, k, &ph, &pw)) return 0;
+    return layer_added(self, "conv1d", ann_add_conv1d(n, filters, k, stride, pw, act));
+}
+
+/* net maxPool2d(size = 2, stride = size): size and stride are a number or [height, width] */
+static ClayPluginValue net_maxpool2d(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "maxPool2d");
+    int ph, pw, sh, sw;
+    if (!size_arg("maxPool2d", argc, argv, 0, 1, 2, 2, &ph, &pw) ||
+        !size_arg("maxPool2d", argc, argv, 1, 1, ph, pw, &sh, &sw)) return 0;
+    return layer_added(self, "maxPool2d", ann_add_maxpool2d_ex(n, ph, pw, sh, sw));
+}
+
+/* net maxPool1d(size = 2, stride = size) */
+static ClayPluginValue net_maxpool1d(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "maxPool1d");
+    int size, stride;
+    if (!int_arg("maxPool1d", argc, argv, 0, 1, 2, 1, &size) ||
+        !int_arg("maxPool1d", argc, argv, 1, 1, size, 1, &stride)) return 0;
+    return layer_added(self, "maxPool1d", ann_add_maxpool1d(n, size, stride));
+}
+
+static ClayPluginValue net_flatten(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    return layer_added(self, "flatten", ann_add_flatten(net_of(self, "flatten")));
+}
+static ClayPluginValue net_global_avg(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    return layer_added(self, "globalAvgPool", ann_add_global_avgpool2d(net_of(self, "globalAvgPool")));
+}
+static ClayPluginValue net_global_max(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    return layer_added(self, "globalMaxPool", ann_add_global_maxpool2d(net_of(self, "globalMaxPool")));
+}
+
+/* net upsample2d(scale = 2): each value repeated in a scale x scale block */
+static ClayPluginValue net_upsample(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "upsample2d");
+    int scale;
+    if (!int_arg("upsample2d", argc, argv, 0, 1, 2, 1, &scale)) return 0;
+    return layer_added(self, "upsample2d", ann_add_upsample2d(n, scale));
+}
+
+/* net reshape(channels, height, width): give the previous layer's values an image shape */
+static ClayPluginValue net_reshape(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "reshape");
+    int c, h, w;
+    if (!int_arg("reshape", argc, argv, 0, 0, 0, 1, &c) || !int_arg("reshape", argc, argv, 1, 0, 0, 1, &h) ||
+        !int_arg("reshape", argc, argv, 2, 0, 0, 1, &w)) return 0;
+    return layer_added(self, "reshape", ann_add_reshape(n, c, h, w));
+}
+
+/* net batchNorm(activation = "none"): normalize each channel over the batch, then the activation.
+ * Put it between a layer and its activation: conv2d(16, 3, "none") batchNorm("relu") */
+static ClayPluginValue net_batchnorm(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "batchNorm");
+    Activation_type act;
+    if (!act_arg("batchNorm", argc, argv, 0, "none", &act)) return 0;
+    return layer_added(self, "batchNorm", ann_add_batchnorm(n, act));
+}
+
+/* net embedding(vocabulary, dimension, paddingId = -1, masked = false): token ids (the layer
+ * below holds a sequence of them) to learned vectors; with masked true, steps holding
+ * paddingId are left out of the layers above */
+static ClayPluginValue net_embedding(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "embedding");
+    int vocab, dim, pad = -1;
+    if (!int_arg("embedding", argc, argv, 0, 0, 0, 1, &vocab) || !int_arg("embedding", argc, argv, 1, 0, 0, 1, &dim)) return 0;
+    if (argc > 2 && !api->is_nil(argv[2])) {
+        if (!api->is_int(argv[2]) || api->to_int(argv[2]) < -1) {
+            api->raise("embedding: paddingId must be a token id, or -1 for none", "ArgumentError");
+            return 0;
+        }
+        pad = (int)api->to_int(argv[2]);
+    }
+    int masked = argc > 3 && !api->is_nil(argv[3]) && argv[3] != api->make_bool(0);
+    return layer_added(self, "embedding",
+                       masked ? ann_add_embedding_masked(n, vocab, dim, pad) : ann_add_embedding(n, vocab, dim, pad));
+}
+
+/* net layerInfo -> one row per layer: [kind, channels, height, width, activation, parameters] */
+static ClayPluginValue net_layer_info(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    PNetwork n = net_of(self, "layerInfo");
+    static const char *kinds[] = { "dense", "conv2d", "maxpool2d", "flatten", "upsample2d", "reshape",
+                                   "global_avgpool2d", "batchnorm", "embedding", "global_maxpool2d" };
+    ClayPluginValue all = api->array_new();
+    for (int i = 0; i < n->layer_count; i++) {
+        int c = 0, h = 0, w = 0;
+        ann_get_layer_shape(n, i, &c, &h, &w);
+        int kind = (int)ann_get_layer_kind(n, i);
+        const char *kname = i == 0 ? "input" : (kind >= 0 && kind < (int)(sizeof(kinds) / sizeof(kinds[0])) ? kinds[kind] : "layer");
+        long params = 0;
+        for (int p = 0, pc = ann_get_layer_param_count(n, i); p < pc; p++) {
+            int r = 0, cc = 0;
+            if (ann_get_layer_param_shape(n, i, p, &r, &cc) == ERR_OK) params += (long)r * cc;
+        }
+        ClayPluginValue row = api->array_new();
+        ClayPluginValue v[6];
+        v[0] = api->make_string(kname);
+        v[1] = api->make_int(c);
+        v[2] = api->make_int(h);
+        v[3] = api->make_int(w);
+        v[4] = api->make_string(i == 0 ? "none" : activation_name(ann_get_layer_activation(n, i)));
+        v[5] = api->make_int((intptr_t)params);
+        for (int k = 0; k < 6; k++) { api->array_push(row, v[k]); api->release(v[k]); }
+        api->array_push(all, row);
+        api->release(row);
+    }
+    return all;
+}
 
 /* net train(inputs, targets) -> the final loss. Each is an Array of rows or an AnnData */
 static ClayPluginValue net_train(ClayPluginObject self, int argc, ClayPluginValue *argv) {
@@ -1358,6 +1626,13 @@ static ClayPluginMethod methods[] = {
     { "predictBatch", net_predict_batch },   { "classifyBatch", net_classify_batch },
     { "confusionMatrix", net_confusion },    { "backendInfo", net_backend_info },
     { "threads", net_threads },              { "version", net_version },
+    { "conv2d", net_conv2d },                { "depthwiseConv2d", net_depthwise },
+    { "conv1d", net_conv1d },                { "maxPool2d", net_maxpool2d },
+    { "maxPool1d", net_maxpool1d },          { "flatten", net_flatten },
+    { "globalAvgPool", net_global_avg },     { "globalMaxPool", net_global_max },
+    { "upsample2d", net_upsample },          { "reshape", net_reshape },
+    { "batchNorm", net_batchnorm },          { "embedding", net_embedding },
+    { "layerInfo", net_layer_info },
     { "trainBegin", net_train_begin },       { "trainStep", net_train_step },
     { "trainEnd", net_train_end },           { "trainEpoch", net_train_epoch },
     { "saveBinary", net_save_binary },       { "loadBinary", net_load_binary },

@@ -53,6 +53,55 @@ Then add layers, from input to output:
 Activations: `"sigmoid"` (default), `"relu"`, `"leaky_relu"`, `"tanh"`, `"softsign"`, `"softmax"`,
 `"gelu"`, `"none"`.
 
+## Image and sequence layers
+
+`input(channels, height, width)` starts a network for images: each sample is a row of
+`channels * height * width` numbers, channel by channel, row by row, so MNIST's 784-column rows
+are `input(1, 28, 28)`. Then add layers, each returning the network:
+
+| Method | Layer |
+|--------|-------|
+| `conv2d(filters, kernel, activation, stride, padding, groups)` | 2-D convolution. `kernel`, `stride` and `padding` are a number or `[height, width]`; `padding` can also be `"same"` (keeps the size at stride 1) or `"valid"` (none, the default). Defaults: activation `"none"`, stride 1, groups 1 |
+| `depthwiseConv2d(multiplier, kernel, activation, stride, padding)` | each input channel gets its own filters (follow it with `conv2d(n, 1)` to mix channels) |
+| `conv1d(filters, kernel, activation, stride, padding)` | convolution along a sequence: `input(features, 1, length)`, or an embedding's output |
+| `maxPool2d(size, stride)` | max pooling; `size` defaults to 2, `stride` to `size`; a number or `[height, width]` |
+| `maxPool1d(size, stride)` | max pooling along a sequence |
+| `batchNorm(activation)` | normalizes each channel over the batch, then applies the activation: `conv2d(16, 3)` then `batchNorm("relu")` |
+| `flatten` | `(C, H, W)` to a flat vector (a `dense` layer after a convolution reads it flat anyway) |
+| `globalAvgPool`, `globalMaxPool` | each channel's mean or largest value: `(C, 1, 1)` |
+| `upsample2d(scale)`, `reshape(channels, height, width)` | for decoders and autoencoders |
+| `embedding(vocabulary, dimension, paddingId, masked)` | token ids to learned vectors; with `masked` true, steps holding `paddingId` are left out of the layers above |
+
+```clay
+net = Ann network(#{"loss": "cross_entropy", "learningRate": 0.001, "quiet": true})
+net input(1, 28, 28)
+net conv2d(8, 3, "relu")
+net maxPool2d(2)
+net conv2d(16, 3, "relu")
+net maxPool2d(2)
+net flatten
+net dense(64, "relu")
+net output(10, "softmax")
+net fit(x, y, #{"epochs": 3, "batchSize": 64})      // 98% on MNIST in a few seconds
+net summary println
+```
+
+`net layers` describes the layers, one Dict per layer with `kind`, `shape` (`[channels, height,
+width]`; dense layers are `[nodes, 1, 1]`), `activation` and `params`. `net summary` is the same as
+a table of text with the total number of parameters:
+
+```
+#   layer             output shape    activation  params
+0   input             1x28x28         none        0
+1   conv2d            8x26x26         relu        80
+...
+total parameters: 27562
+```
+
+Everything else works on these networks as before: `train`, `fit`, `predictBatch`, `save`,
+`quantize` and the exports. Mistakes (a convolution with no input layer, a window bigger than its
+input, a `reshape` that changes the size) raise `ArgumentError`.
+
 ## Training controls
 
 `Ann network` takes these options too, and each is also a method that returns the network, so

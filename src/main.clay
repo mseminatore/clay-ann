@@ -19,6 +19,11 @@
 //     dense(n, activation)     a fully connected hidden layer
 //     output(n, activation)    the output layer
 //     addLayer(n, kind, act)   the general form: kind "input", "hidden", "output"
+//     input(channels, height, width)  an image input; then conv2d(filters, kernel, act, stride,
+//       padding, groups), depthwiseConv2d, conv1d, maxPool2d(size, stride), maxPool1d, batchNorm(act),
+//       flatten, globalAvgPool, globalMaxPool, upsample2d(scale), reshape(c, h, w),
+//       embedding(vocabulary, dimension, paddingId, masked)
+//     layers (a Dict per layer: kind, shape, activation, params), summary (a table of text)
 //       activations: "sigmoid" (default), "relu", "leaky_relu", "tanh",
 //                    "softsign", "softmax", "gelu", "none"
 //
@@ -227,4 +232,38 @@ AnnNet setMethod("fit", { |x, y, options|
     }
     net learningRate(base)
     history
+})
+
+// net layers: one Dict per layer, input first: kind ("input", "dense", "conv2d", "maxpool2d",
+// "flatten", ...), shape ([channels, height, width]; dense layers are [nodes, 1, 1]),
+// activation and params (the number of weights and biases)
+AnnNet setMethod("layers", {
+    info = self layerInfo
+    info map { |r|
+        #{"kind": r at(0), "shape": [r at(1), r at(2), r at(3)], "activation": r at(4), "params": r at(5)}
+    }
+})
+
+// net summary: the layers as a table of text, with the total number of parameters.
+// Print it with `net summary println`.
+AnnNet setMethod("summary", {
+    cell = { |text, width|
+        t = text toString
+        { t length < width } whileTrue { t = t + " " }
+        t
+    }
+    out = (cell value("#", 4)) + (cell value("layer", 18)) + (cell value("output shape", 16)) +
+          (cell value("activation", 12)) + "params\n"
+    total = 0
+    i = 0
+    (self layers) each { |l|
+        sh = l get("shape")
+        shape = (sh at(0)) toString + "x" + (sh at(1)) toString + "x" + (sh at(2)) toString
+        ((sh at(1)) == 1 && (sh at(2)) == 1) ifTrue { shape = (sh at(0)) toString }
+        out = out + (cell value(i, 4)) + (cell value(l get("kind"), 18)) + (cell value(shape, 16)) +
+              (cell value(l get("activation"), 12)) + (l get("params")) toString + "\n"
+        total = total + (l get("params"))
+        i = i + 1
+    }
+    out + "total parameters: " + total toString
 })

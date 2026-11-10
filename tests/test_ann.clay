@@ -277,6 +277,137 @@ check value("scheduledRate step", (Ann scheduledRate(["step", 2, 0.5], 1, 3)) ==
 check value("scheduledRate cosine ends at the minimum", (Ann scheduledRate(["cosine", 10, 0.01], 1, 10)) == 0.01)
 check value("scheduledRate none", (Ann scheduledRate(["none"], 0.3, 7)) == 0.3)
 
+// image layers: shapes, parameters and the summary
+img = Ann network(#{"loss": "cross_entropy", "quiet": true})
+img input(1, 8, 8)
+img conv2d(4, 3, "relu")
+img maxPool2d(2)
+img conv2d(6, [3, 1], "relu", 1, [1, 0])
+img flatten
+img dense(5, "relu")
+img output(2, "softmax")
+ls = img layers
+check value("layer kinds", (ls map { |l| l get("kind") }) == ["input", "conv2d", "maxpool2d", "conv2d", "flatten", "dense", "dense"])
+check value("shapes", (ls map { |l| l get("shape") }) == [[1, 8, 8], [4, 6, 6], [4, 3, 3], [6, 3, 3], [54, 1, 1], [5, 1, 1], [2, 1, 1]])
+check value("parameter counts", (ls map { |l| l get("params") }) == [0, 40, 0, 78, 0, 275, 12])
+check value("activations", ((ls at(1)) get("activation")) == "relu" && ((ls at(6)) get("activation")) == "softmax")
+check value("summary", ((img summary) contains("conv2d")) && ((img summary) contains("total parameters: 405")))
+check value("sizes of an image network", img sizes == [64, 144, 36, 54, 54, 5, 2])
+same = Ann network
+same input(2, 9, 9)
+same conv2d(3, 3, "none", 2, "same")
+check value("same padding and stride", (same layers at(1)) get("shape") == [3, 5, 5])
+grouped = Ann network
+grouped input(4, 6, 6)
+grouped conv2d(8, 3, "none", 1, 0, 2)
+grouped depthwiseConv2d(2, 3)
+check value("grouped and depthwise", (grouped layers) map { |l| l get("shape") } == [[4, 6, 6], [8, 4, 4], [16, 2, 2]])
+check value("grouped parameters", ((grouped layers at(1)) get("params")) == 8 * 2 * 9 + 8)
+other = Ann network
+other input(1, 4, 4)
+other upsample2d(2)
+other reshape(4, 4, 4)
+other batchNorm("relu")
+other globalAvgPool
+check value("upsample, reshape, batchNorm, pooling", (other layers) map { |l| l get("shape") } == [[1, 4, 4], [1, 8, 8], [4, 4, 4], [4, 4, 4], [4, 1, 1]])
+check value("batchNorm has parameters", ((other layers at(3)) get("params")) > 0)
+check value("globalMaxPool", ((Ann network input(3, 5, 5) globalMaxPool) layers at(1)) get("shape") == [3, 1, 1])
+
+// a small conv net learns bars: horizontal against vertical
+Ann seed(7)
+bars = []
+barLabels = []
+k = 0
+{ k < 48 } whileTrue {
+    horizontal = (k % 2) == 0
+    pos = (k / 2) % 6
+    pixels = []
+    r = 0
+    { r < 6 } whileTrue {
+        c = 0
+        { c < 6 } whileTrue {
+            on = horizontal ifTrue { r == pos } ifFalse { c == pos }
+            pixels push(on ifTrue { 1 } ifFalse { 0 })
+            c = c + 1
+        }
+        r = r + 1
+    }
+    bars push(pixels)
+    barLabels push([horizontal ifTrue { 0 } ifFalse { 1 }])
+    k = k + 1
+}
+bx = AnnData fromArray(bars)
+by = (AnnData fromArray(barLabels)) oneHot(2)
+cnn = Ann network(#{"loss": "cross_entropy", "learningRate": 0.01, "epochs": 200, "batchSize": 16, "quiet": true})
+cnn input(1, 6, 6)
+cnn conv2d(8, 3, "relu", 1, "same")
+cnn maxPool2d(2)
+cnn flatten
+cnn output(2, "softmax")
+cnn train(bx, by)
+check value("a conv net learns", (cnn accuracy(bx, by)) > 0.95)
+check value("fit works on a conv net", (cnn fit(bx, by, #{"epochs": 2})) size == 2)
+
+// a conv net survives saving, quantizing and export
+cdir = File tempDir
+cbin = cdir + "/cnn.nnb"
+cnn saveBinary(cbin)
+cback = Ann loadBinary(cbin)
+check value("conv net binary round trip", (cback layers) == (cnn layers) && (cback predict(bars at(0))) == (cnn predict(bars at(0))))
+cq = cnn quantize(bx)
+check value("quantized conv net", (cq accuracy(bx, by)) > 0.9)
+cnn exportC(cdir + "/cnn.h", "cnn")
+check value("conv net C header", File exists(cdir + "/cnn.h"))
+File delete(cbin)
+File delete(cdir + "/cnn.h")
+File delete(cdir)
+
+// sequences: an embedding, a 1-D convolution and global max pooling find a token
+Ann seed(11)
+seqs = []
+seqLabels = []
+k = 0
+{ k < 40 } whileTrue {
+    has = (k % 2) == 0
+    s = []
+    j = 0
+    { j < 6 } whileTrue {
+        s push((j == (k % 5)) ifTrue { has ifTrue { 4 } ifFalse { 1 } } ifFalse { ((j + k) % 3) + 1 })
+        j = j + 1
+    }
+    seqs push(s)
+    seqLabels push([has ifTrue { 1 } ifFalse { 0 }])
+    k = k + 1
+}
+sx = AnnData fromArray(seqs)
+sy = (AnnData fromArray(seqLabels)) oneHot(2)
+txt = Ann network(#{"loss": "cross_entropy", "learningRate": 0.02, "epochs": 150, "batchSize": 8, "quiet": true})
+txt input(6)
+txt embedding(5, 4, 0, true)
+txt conv1d(6, 2, "relu")
+txt globalMaxPool
+txt output(2, "softmax")
+check value("embedding shape", (txt layers at(1)) get("shape") == [4, 1, 6])
+check value("conv1d shape", (txt layers at(2)) get("shape") == [6, 1, 5])
+txt train(sx, sy)
+check value("a text-style net learns", (txt accuracy(sx, sy)) > 0.9)
+seqnet = Ann network
+seqnet input(3, 1, 10)
+seqnet conv1d(5, 3, "relu", 1, "same")
+seqnet maxPool1d(2)
+check value("conv1d and maxPool1d on a sequence", (seqnet layers) map { |l| l get("shape") } == [[3, 1, 10], [5, 1, 10], [5, 1, 5]])
+
+// mistakes building layers are ArgumentErrors
+check value("conv2d with no input", (raises value({ Ann network conv2d(4, 3) })) == "ArgumentError")
+check value("kernel too big", (raises value({ Ann network input(1, 4, 4) conv2d(2, 9) })) == "ArgumentError")
+check value("bad kernel", (raises value({ Ann network input(1, 4, 4) conv2d(2, [3]) })) == "ArgumentError")
+check value("bad padding", (raises value({ Ann network input(1, 4, 4) conv2d(2, 3, "relu", 1, "wide") })) == "ArgumentError")
+check value("bad activation", (raises value({ Ann network input(1, 4, 4) conv2d(2, 3, "nope") })) == "ArgumentError")
+check value("no filters", (raises value({ Ann network input(1, 4, 4) conv2d(0, 3) })) == "ArgumentError")
+check value("reshape size mismatch", (raises value({ Ann network input(8) reshape(2, 2, 3) })) == "ArgumentError")
+check value("image input after layers", (raises value({ Ann network input(4) input(1, 2, 2) })) == "ArgumentError")
+check value("pool too big", (raises value({ Ann network input(1, 2, 2) maxPool2d(3) })) == "ArgumentError")
+
 // a loss that doesn't fit the output layer is an error, not a quiet 0
 bad = Ann network(#{"loss": "cross_entropy", "quiet": true})
 bad input(2)
