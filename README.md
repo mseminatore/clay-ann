@@ -53,6 +53,32 @@ Then add layers, from input to output:
 Activations: `"sigmoid"` (default), `"relu"`, `"leaky_relu"`, `"tanh"`, `"softsign"`, `"softmax"`,
 `"gelu"`, `"none"`.
 
+## Training controls
+
+`Ann network` takes these options too, and each is also a method that returns the network, so
+they chain (`net dropout(0.2) weightDecay(0.0001)`):
+
+| Option / method | |
+|--------|---|
+| `weightDecay`, `l1` | L2 and L1 regularization strengths |
+| `dropout` | a rate for every hidden layer; `net dropout(layer, rate)` sets one layer |
+| `gradientClip` | clip gradients to this size |
+| `weightInit` | `"auto"` (default), `"uniform"`, `"xavier"`, `"he"` |
+| `lossReduction` | `"sum"` or `"mean"` over the batch |
+| `inputNoise` | `["gaussian", 0.05]`, `["masking", 0.1]` or `["salt_pepper", 0.1, 0, 1]`: noise added to each training input |
+| `lrSchedule` | `["step", stepSize, gamma]`, `["exponential", gamma]`, `["cosine", tMax, minLr]` or `["none"]` |
+| `validation` | `[inputs, targets]`, held out: its loss is reported each epoch |
+| `earlyStopping` | patience in epochs, or `[patience, minDelta, restoreBest]`: stop when the loss (the validation loss, if there is one) stops improving |
+
+After training: `net epochsTrained`, `net bestEpoch` (with early stopping),
+`net history` (a row `[loss, learningRate, validationLoss]` per epoch, with -1 when there was no
+validation data), `net clearHistory`, and `net learningCurve(path)` to write the history as a CSV file.
+
+```clay
+net = Ann network(#{"loss": "cross_entropy", "epochs": 50, "dropout": 0.2,
+                    "validation": [xTest, yTest], "earlyStopping": 5, "quiet": true})
+```
+
 ## Training and using a network
 
 Data are Arrays of rows: one row of numbers per sample.
@@ -62,6 +88,9 @@ Data are Arrays of rows: one row of numbers per sample.
 | `train(inputs, targets)` | the final loss |
 | `predict(row)` | the outputs, an Array |
 | `classify(row)` | the index of the largest output |
+| `predictBatch(inputs)` | the outputs of every row at once: an AnnData for an AnnData, else an Array of rows |
+| `classifyBatch(inputs)` | the class of every row: a one-column AnnData for an AnnData, else an Array |
+| `confusionMatrix(inputs, targets)` | counts as rows of `matrix[actual][predicted]`; targets are one-hot rows or a column of class numbers |
 | `accuracy(inputs, targets)` | the fraction classified correctly, 0 to 1 |
 | `evaluate(inputs, targets)` | the loss over the data |
 | `sizes` | the layer sizes, e.g. `[2, 4, 1]` |
@@ -100,7 +129,21 @@ second. The methods below return new tables, so they chain; `to` is exclusive an
 | `oneHot(classes)` | a one-column table of labels `0..classes-1` as rows of `classes` columns |
 | `scale(divisor)` | every value divided by `divisor` |
 | `row(i)` | row `i` as an Array |
+| `AnnData fromArray(rows)` | a table from an Array of rows |
+| `shuffle` | the rows in random order (repeatable after `Ann seed(n)`) |
+| `split(fraction)` | `[first, rest]`: `split(0.8)` is an 80% / 20% split (shuffle first) |
+| `mean`, `std` | the mean and standard deviation of each column, as Arrays |
+| `standardize` | every column shifted to mean 0 and scaled to standard deviation 1 |
+| `argmax` | a one-column table: the index of the largest value in each row |
 | `toArray` | an Array of rows (boxes every value, so avoid on big tables) |
+
+## Speed
+
+On macOS the brick is built against Apple's Accelerate (BLAS), which makes training several times
+faster than libann's own loops. Elsewhere it uses those loops. `Ann backend` says what is in use:
+a Dict with `blas`, `gpu`, `gpuActive`, `threads`, `realBytes` and `optimized` (false means a slow
+debug build). `Ann threads(n)` sets the CPU threads for libann's own loops; `Ann threads` reads
+them; `Ann version` is libann's version.
 
 ## Examples
 

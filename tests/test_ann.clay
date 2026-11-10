@@ -70,6 +70,116 @@ check value("table width mismatch", (raises value({ net train(xor, xor column(2)
 File delete(csv)
 File delete(dir)
 
+// training controls chain, and mistakes in them are ArgumentErrors
+cnet = Ann network(#{"quiet": true})
+cnet input(2)
+cnet dense(3, "relu")
+cnet output(1, "sigmoid")
+check value("controls chain", (cnet weightDecay(0.0001) l1(0) dropout(0.1) gradientClip(5) weightInit("he") lossReduction("mean") inputNoise("gaussian", 0.01) lrSchedule("cosine", 100, 0.01) lrSchedule("none")) sizes == [2, 3, 1])
+check value("layer dropout", (cnet dropout(1, 0.2)) sizes == [2, 3, 1])
+check value("bad dropout rate", (raises value({ cnet dropout(1.5) })) == "ArgumentError")
+check value("bad dropout layer", (raises value({ cnet dropout(9, 0.5) })) == "ArgumentError")
+check value("bad weightInit", (raises value({ cnet weightInit("x") })) == "ArgumentError")
+check value("bad lossReduction", (raises value({ cnet lossReduction("x") })) == "ArgumentError")
+check value("bad noise kind", (raises value({ cnet inputNoise("x") })) == "ArgumentError")
+check value("bad schedule", (raises value({ cnet lrSchedule("x") })) == "ArgumentError")
+check value("non-number setting", (raises value({ cnet weightDecay("x") })) == "ArgumentError")
+
+// validation data, early stopping and the training history
+Ann seed(3)
+vnet = Ann network(#{"learningRate": 0.5, "epochs": 300, "quiet": true,
+                     "validation": [xs, ys], "earlyStopping": [5, 0, true],
+                     "lrSchedule": ["exponential", 0.99]})
+vnet input(2)
+vnet dense(4, "sigmoid")
+vnet output(1, "sigmoid")
+check value("no history before training", vnet history size == 0 && vnet epochsTrained == 0)
+vnet train(xs, ys)
+trained = vnet epochsTrained
+check value("epochsTrained", trained > 0 && trained <= 300)
+check value("history has a row per epoch", vnet history size == trained)
+row = (vnet history) at(0)
+check value("history row: loss, rate, validation loss", row size == 3 && (row at(0)) > 0 && (row at(2)) >= 0)
+check value("bestEpoch", vnet bestEpoch >= 1 && vnet bestEpoch <= trained)
+vnet clearHistory
+check value("clearHistory", vnet history size == 0)
+nv = Ann network(#{"learningRate": 0.5, "epochs": 5, "quiet": true})
+nv input(2)
+nv dense(2, "sigmoid")
+nv output(1, "sigmoid")
+nv train(xs, ys)
+check value("no validation loss is -1", (((nv history) at(0)) at(2)) == -1)
+cdir = File tempDir
+curve = cdir + "/curve.csv"
+nv learningCurve(curve)
+check value("learningCurve writes a file", File exists(curve))
+File delete(curve)
+File delete(cdir)
+check value("validation row mismatch", (raises value({ nv validation(xs, [[1]]) })) == "ArgumentError")
+
+// batch prediction, and classification from tables
+// the batched (matrix) path may round the last digit differently from one row at a time
+batch = net predictBatch(xs)
+close = true
+xs each { |r|
+    i = xs indexOf(r)
+    ((((batch at(i)) at(0)) - ((net predict(r)) at(0))) abs > 0.0001) ifTrue { close = false }
+}
+check value("predictBatch matches predict", close)
+Ann seed(5)
+rows = []
+labels = []
+k = 0
+{ k < 30 } whileTrue {
+    c = k % 3
+    rows push([(c == 0) ifTrue { 1 } ifFalse { 0 }, (c == 1) ifTrue { 1 } ifFalse { 0 }, (c == 2) ifTrue { 1 } ifFalse { 0 }])
+    labels push([c])
+    k = k + 1
+}
+feat = AnnData fromArray(rows)
+labs = AnnData fromArray(labels)
+cls = Ann network(#{"loss": "cross_entropy", "learningRate": 0.05, "epochs": 300, "quiet": true})
+cls input(3)
+cls dense(6, "relu")
+cls output(3, "softmax")
+cls train(feat, labs oneHot(3))
+check value("accuracy from tables", (cls accuracy(feat, labs oneHot(3))) > 0.99)
+pred = cls predictBatch(feat)
+check value("predictBatch of a table is a table", pred rows == 30 && pred cols == 3)
+check value("argmax of predictions", ((pred argmax) toArray) == labels)
+check value("classifyBatch of a table", ((cls classifyBatch(feat)) toArray) == labels)
+check value("classifyBatch of Arrays", (cls classifyBatch(rows)) == (labels map { |l| l at(0) }))
+conf = cls confusionMatrix(feat, labs oneHot(3))
+check value("confusion matrix", conf == [[10, 0, 0], [0, 10, 0], [0, 0, 10]])
+check value("confusion from class numbers", (cls confusionMatrix(feat, labs)) == conf)
+check value("confusion class out of range", (raises value({ cls confusionMatrix(feat, AnnData fromArray([[7]])) })) == "ArgumentError")
+check value("batch width mismatch", (raises value({ cls predictBatch([[1, 2]]) })) == "ArgumentError")
+
+// table extras
+t = AnnData fromArray([[1, 10], [2, 20], [3, 30], [4, 40]])
+check value("mean", t mean == [2.5, 25])
+check value("std", ((t std) at(0)) > 1.11 && ((t std) at(0)) < 1.12)
+z = t standardize
+check value("standardize centers", ((z mean) at(0)) < 0.0001 && ((z mean) at(0)) > -0.0001)
+check value("constant column is only shifted", ((AnnData fromArray([[5, 1], [5, 2]])) standardize) toArray == [[0, -1], [0, 1]])
+parts = t split(0.75)
+check value("split", (parts at(0)) rows == 3 && (parts at(1)) rows == 1 && ((parts at(1)) row(0)) == [4, 40])
+check value("split fraction", (raises value({ t split(1) })) == "ArgumentError")
+Ann seed(9)
+a = t shuffle
+Ann seed(9)
+b = t shuffle
+check value("shuffle repeats after seed", (a toArray) == (b toArray))
+check value("shuffle keeps rows whole", ((a toArray) map { |r| (r at(1)) / (r at(0)) }) == [10, 10, 10, 10])
+check value("shuffle keeps every row", (a mean) == [2.5, 25])
+check value("argmax", ((AnnData fromArray([[1, 3, 2], [9, 0, 0]])) argmax) toArray == [[1], [0]])
+
+// what libann computes with
+info = Ann backend
+check value("backend", (info get("threads")) >= 1 && (info get("realBytes")) == 4)
+check value("threads", Ann threads == (info get("threads")))
+check value("version", (Ann version) length > 0)
+
 // errors are Clay errors, not crashes
 check value("wrong input width", (raises value({ net predict([1, 2, 3]) })) == "ArgumentError")
 check value("ragged rows", (raises value({ net train([[1, 2], [3]], [[1], [0]]) })) == "ArgumentError")

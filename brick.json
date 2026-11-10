@@ -6,9 +6,27 @@
   "deps": {},
   "native": {
     "plugin": "ann",
-    "sources": ["native/clay_ann.c", "native/libann/ann.c", "native/libann/tensor.c",
-                "native/libann/ann_hypertune.c", "native/libann/json.c", "native/libann/ann_quantize.c"],
+    "sources": [
+      "native/clay_ann.c",
+      "native/libann/ann.c",
+      "native/libann/tensor.c",
+      "native/libann/ann_hypertune.c",
+      "native/libann/json.c",
+      "native/libann/ann_quantize.c"
+    ],
     "cflags": [],
-    "libs": ["-lm", "-lpthread"]
+    "libs": [
+      "-lm",
+      "-lpthread"
+    ],
+    "cflags-macos": [
+      "-DUSE_BLAS",
+      "-DUSE_ACCELERATE",
+      "-Dcblas_saxpby=catlas_saxpby",
+      "-I@/native/shim"
+    ],
+    "libs-macos": [
+      "-Wl,-framework,Accelerate"
+    ]
   }
 }

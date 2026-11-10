@@ -24,6 +24,9 @@
 //
 //   Settings (each returns the network; Ann network sets them from options)
 //     learningRate(r)  epochs(n)  batchSize(n)  convergence(loss)  quiet
+//     weightDecay(l)  l1(l)  dropout(rate)  dropout(layer, rate)  gradientClip(max)
+//     weightInit(kind)  lossReduction(kind)  inputNoise(kind, amount, low, high)
+//     lrSchedule(kind, ...)  validation(inputs, targets)  earlyStopping(patience, minDelta, restore)
 //
 //   Training and using it (data are Arrays of rows of numbers)
 //     train(inputs, targets)     -> the final loss
@@ -32,6 +35,11 @@
 //     accuracy(inputs, targets)  -> the fraction classified correctly, 0 to 1
 //     evaluate(inputs, targets)  -> the loss over the data
 //     (inputs and targets are Arrays of rows, or AnnData tables: see Ann loadCsv)
+//     predictBatch(inputs)       -> the outputs of every row (a table for a table)
+//     classifyBatch(inputs)      -> the class of every row
+//     confusionMatrix(inputs, targets) -> counts, matrix[actual][predicted]
+//     epochsTrained, bestEpoch, history (rows of [loss, rate, validation loss]),
+//     clearHistory, learningCurve(path)
 //     sizes                      -> the layer sizes, e.g. [2, 4, 1]
 //     save(path)                 writes the network (Ann load(path) reads it)
 //
@@ -44,6 +52,14 @@ Ann = Object clone {
     //   loss: "mse" (default) or "cross_entropy"
     //   learningRate, epochs, batchSize, convergence (stop below this loss)
     //   quiet: true silences libann's training progress
+    //   Regularization: weightDecay, l1 (numbers), dropout (a rate for every hidden layer),
+    //     gradientClip (a limit), inputNoise ([kind, amount, low, high] with kind "gaussian",
+    //     "masking" or "salt_pepper")
+    //   Setup: weightInit ("auto", "uniform", "xavier", "he"), lossReduction ("sum" or "mean")
+    //   Schedule: lrSchedule (["step", stepSize, gamma], ["exponential", gamma] or
+    //     ["cosine", tMax, minLr])
+    //   Stopping: validation ([inputs, targets] held out; its loss is reported each epoch),
+    //     earlyStopping (patience in epochs, or [patience, minDelta, restoreBest])
     network(options = nil) {
         o = options ?? #{}
         net = AnnNet create((o get("optimizer")) ?? "adam", (o get("loss")) ?? "mse")
@@ -52,8 +68,54 @@ Ann = Object clone {
         (o has("batchSize")) ifTrue { net batchSize(o get("batchSize")) }
         (o has("convergence")) ifTrue { net convergence(o get("convergence")) }
         ((o get("quiet")) == true) ifTrue { net quiet }
+        (o has("weightDecay")) ifTrue { net weightDecay(o get("weightDecay")) }
+        (o has("l1")) ifTrue { net l1(o get("l1")) }
+        (o has("dropout")) ifTrue { net dropout(o get("dropout")) }
+        (o has("gradientClip")) ifTrue { net gradientClip(o get("gradientClip")) }
+        (o has("weightInit")) ifTrue { net weightInit(o get("weightInit")) }
+        (o has("lossReduction")) ifTrue { net lossReduction(o get("lossReduction")) }
+        (o has("inputNoise")) ifTrue {
+            n = o get("inputNoise")
+            (n size > 3) ifTrue { net inputNoise(n at(0), n at(1), n at(2), n at(3)) }
+            (n size == 3) ifTrue { net inputNoise(n at(0), n at(1), n at(2)) }
+            (n size == 2) ifTrue { net inputNoise(n at(0), n at(1)) }
+            (n size == 1) ifTrue { net inputNoise(n at(0)) }
+        }
+        (o has("lrSchedule")) ifTrue {
+            c = o get("lrSchedule")
+            (c size > 2) ifTrue { net lrSchedule(c at(0), c at(1), c at(2)) }
+            (c size == 2) ifTrue { net lrSchedule(c at(0), c at(1)) }
+            (c size == 1) ifTrue { net lrSchedule(c at(0)) }
+        }
+        (o has("validation")) ifTrue {
+            v = o get("validation")
+            net validation(v at(0), v at(1))
+        }
+        (o has("earlyStopping")) ifTrue {
+            e = o get("earlyStopping")
+            (e hasMethod("size")) ifTrue {
+                (e size > 2) ifTrue { net earlyStopping(e at(0), e at(1), e at(2)) }
+                (e size == 2) ifTrue { net earlyStopping(e at(0), e at(1)) }
+                (e size == 1) ifTrue { net earlyStopping(e at(0)) }
+            }
+            (e hasMethod("size")) ifFalse { net earlyStopping(e) }
+        }
         net
     }
+
+    // What libann computes with, as a Dict: blas ("none", "Accelerate", "OpenBLAS", ...),
+    // gpu, gpuActive, threads, realBytes, optimized (false: a slow debug build)
+    backend() {
+        b = AnnNet backendInfo
+        #{"blas": b at(0), "gpu": b at(1), "gpuActive": (b at(2)) != 0, "threads": b at(3),
+          "realBytes": b at(4), "optimized": (b at(5)) != 0}
+    }
+
+    // CPU threads for libann's own loops: Ann threads(4) sets, Ann threads reads
+    threads(n = nil) { (n == nil) ifTrue { AnnNet threads } ifFalse { AnnNet threads(n) } }
+
+    // libann's version, e.g. "0.10.0"
+    version() { AnnNet version }
 
     // A network saved with net save(path)
     load(path) { AnnNet load(path) }

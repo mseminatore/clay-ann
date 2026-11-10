@@ -10,6 +10,7 @@
 #include "clay_plugin.h"
 #include "libann/ann.h"
 #include "libann/tensor.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,14 +19,31 @@ static const ClayPluginAPI *api;
 
 /* --- helpers ------------------------------------------------------------ */
 
-static PNetwork net_of(ClayPluginObject self, const char *who) {
-    PNetwork n = (PNetwork)api->get_data(self);
-    if (!n) {
+/* What an AnnNet object holds: the libann network, plus what libann only
+ * borrows and so must outlive training (the validation set, scheduler settings) */
+typedef struct {
+    PNetwork net;
+    PTensor val_x, val_y;
+    union {
+        LRStepParams step;
+        LRExponentialParams expo;
+        LRCosineParams cosine;
+    } sched;
+} NetData;
+
+static NetData *nd_of(ClayPluginObject self, const char *who) {
+    NetData *d = (NetData *)api->get_data(self);
+    if (!d) {
         char msg[128];
         snprintf(msg, sizeof(msg), "%s: not a network (make one with Ann network)", who);
         api->raise(msg, "RuntimeError");
     }
-    return n;
+    return d;
+}
+
+static PNetwork net_of(ClayPluginObject self, const char *who) {
+    NetData *d = nd_of(self, who);
+    return d ? d->net : NULL;
 }
 
 static int str_eq(const char *a, const char *b) { return strcmp(a, b) == 0; }
@@ -117,6 +135,16 @@ static void net_print(const char *text) {
     else fputs(text, stdout);
 }
 
+/* a new AnnNet object (a clone of proto) owning network n */
+static ClayPluginValue net_wrap(ClayPluginObject proto, PNetwork n) {
+    NetData *d = (NetData *)calloc(1, sizeof(NetData));
+    if (!d) { ann_free_network(n); api->raise("ann: out of memory", "RuntimeError"); return 0; }
+    d->net = n;
+    ClayPluginObject obj = api->clone(proto);
+    api->set_data(obj, d);
+    return (ClayPluginValue)obj;
+}
+
 /* AnnNet create(optimizer, loss) -> a new, empty network */
 static ClayPluginValue net_create(ClayPluginObject self, int argc, ClayPluginValue *argv) {
     const char *opt = str_arg(argc, argv, 0, "adam");
@@ -137,9 +165,7 @@ static ClayPluginValue net_create(ClayPluginObject self, int argc, ClayPluginVal
     PNetwork n = ann_make_network(o, l);
     if (!n) { api->raise("ann: cannot create a network", "RuntimeError"); return 0; }
     ann_set_print_function(n, net_print);
-    ClayPluginObject obj = api->clone(self);
-    api->set_data(obj, n);
-    return (ClayPluginValue)obj;
+    return net_wrap(self, n);
 }
 
 /* net addLayer(nodes, "input" | "hidden" | "output", activation) */
@@ -302,9 +328,7 @@ static ClayPluginValue net_load(ClayPluginObject self, int argc, ClayPluginValue
     PNetwork n = ann_load_network(path);
     if (!n) { api->raise("ann: cannot load the network", "RuntimeError"); return 0; }
     ann_set_print_function(n, net_print);
-    ClayPluginObject obj = api->clone(self);
-    api->set_data(obj, n);
-    return (ClayPluginValue)obj;
+    return net_wrap(self, n);
 }
 
 /* AnnNet seed(n): make weight initialization repeatable */
@@ -313,12 +337,366 @@ static ClayPluginValue net_seed(ClayPluginObject self, int argc, ClayPluginValue
     return (ClayPluginValue)self;
 }
 
-static void net_free(void *data) { ann_free_network((PNetwork)data); }
+static void net_free(void *data) {
+    NetData *d = (NetData *)data;
+    if (!d) return;
+    ann_free_network(d->net);          /* before the tensors it borrows */
+    if (d->val_x) tensor_free(d->val_x);
+    if (d->val_y) tensor_free(d->val_y);
+    free(d);
+}
 
 /* libann's errors become Clay errors (raised by the methods above), so it
  * shouldn't also print them */
 static void quiet_errors(int code, const char *msg, const char *func) {
     (void)code; (void)msg; (void)func;
+}
+
+/* --- training controls ---------------------------------------------------- */
+
+static real real_arg(const char *who, int argc, ClayPluginValue *argv, int i) {
+    if (i >= argc || !(api->is_int(argv[i]) || api->is_float(argv[i]))) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s needs a number", who);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    return api->to_float(argv[i]);
+}
+
+static ClayPluginValue net_set_weight_decay(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "weightDecay");
+    ann_set_weight_decay(n, real_arg("weightDecay", argc, argv, 0));
+    return (ClayPluginValue)self;
+}
+static ClayPluginValue net_set_l1(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "l1");
+    ann_set_l1_regularization(n, real_arg("l1", argc, argv, 0));
+    return (ClayPluginValue)self;
+}
+static ClayPluginValue net_set_clip(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "gradientClip");
+    ann_set_gradient_clip(n, real_arg("gradientClip", argc, argv, 0));
+    return (ClayPluginValue)self;
+}
+
+/* dropout(rate) for every hidden layer, or dropout(layer, rate) for one */
+static ClayPluginValue net_set_dropout(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "dropout");
+    real rate = real_arg("dropout", argc, argv, argc > 1 ? 1 : 0);
+    if (rate < 0 || rate >= 1) { api->raise("dropout: the rate must be from 0 up to (not including) 1", "ArgumentError"); return 0; }
+    if (argc > 1) {
+        if (!api->is_int(argv[0]) || api->to_int(argv[0]) < 0 || api->to_int(argv[0]) >= n->layer_count) {
+            api->raise("dropout: no such layer", "ArgumentError");
+            return 0;
+        }
+        ann_set_layer_dropout(n, (int)api->to_int(argv[0]), rate);
+    } else {
+        ann_set_dropout(n, rate);
+    }
+    return (ClayPluginValue)self;
+}
+
+static ClayPluginValue net_set_weight_init(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "weightInit");
+    const char *k = str_arg(argc, argv, 0, "");
+    Weight_init_type t;
+    if (str_eq(k, "auto")) t = WEIGHT_INIT_AUTO;
+    else if (str_eq(k, "uniform")) t = WEIGHT_INIT_UNIFORM;
+    else if (str_eq(k, "xavier")) t = WEIGHT_INIT_XAVIER;
+    else if (str_eq(k, "he")) t = WEIGHT_INIT_HE;
+    else { api->raise("weightInit must be auto, uniform, xavier or he", "ArgumentError"); return 0; }
+    ann_set_weight_init(n, t);
+    return (ClayPluginValue)self;
+}
+
+static ClayPluginValue net_set_loss_reduction(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "lossReduction");
+    const char *k = str_arg(argc, argv, 0, "");
+    if (!str_eq(k, "sum") && !str_eq(k, "mean")) {
+        api->raise("lossReduction must be sum or mean", "ArgumentError");
+        return 0;
+    }
+    ann_set_loss_reduction(n, str_eq(k, "sum") ? LOSS_REDUCTION_SUM : LOSS_REDUCTION_MEAN);
+    return (ClayPluginValue)self;
+}
+
+/* inputNoise(kind, amount, low, high): kind is none, gaussian, masking or salt_pepper */
+static ClayPluginValue net_set_noise(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "inputNoise");
+    const char *k = str_arg(argc, argv, 0, "");
+    Noise_type t;
+    if (str_eq(k, "none")) t = NOISE_NONE;
+    else if (str_eq(k, "gaussian")) t = NOISE_GAUSSIAN;
+    else if (str_eq(k, "masking")) t = NOISE_MASKING;
+    else if (str_eq(k, "salt_pepper")) t = NOISE_SALT_PEPPER;
+    else { api->raise("inputNoise kind must be none, gaussian, masking or salt_pepper", "ArgumentError"); return 0; }
+    real amount = argc > 1 ? real_arg("inputNoise", argc, argv, 1) : 0;
+    real low = argc > 2 ? real_arg("inputNoise", argc, argv, 2) : 0;
+    real high = argc > 3 ? real_arg("inputNoise", argc, argv, 3) : 0;
+    if (ann_set_input_noise(n, t, amount, low, high) != ERR_OK) {
+        api->raise("inputNoise: bad amount or range", "ArgumentError");
+        return 0;
+    }
+    return (ClayPluginValue)self;
+}
+
+/* lrSchedule("step", stepSize, gamma) | ("exponential", gamma) | ("cosine", tMax, minLr) | ("none") */
+static ClayPluginValue net_set_schedule(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    NetData *d = nd_of(self, "lrSchedule");
+    const char *k = str_arg(argc, argv, 0, "");
+    if (str_eq(k, "none")) {
+        ann_set_lr_scheduler(d->net, NULL, NULL);
+    } else if (str_eq(k, "step")) {
+        d->sched.step.step_size = (unsigned)(real_arg("lrSchedule", argc, argv, 1));
+        d->sched.step.gamma = real_arg("lrSchedule", argc, argv, 2);
+        ann_set_lr_scheduler(d->net, ann_lr_scheduler_step, &d->sched.step);
+    } else if (str_eq(k, "exponential")) {
+        d->sched.expo.gamma = real_arg("lrSchedule", argc, argv, 1);
+        ann_set_lr_scheduler(d->net, ann_lr_scheduler_exponential, &d->sched.expo);
+    } else if (str_eq(k, "cosine")) {
+        d->sched.cosine.T_max = (unsigned)(real_arg("lrSchedule", argc, argv, 1));
+        d->sched.cosine.min_lr = argc > 2 ? real_arg("lrSchedule", argc, argv, 2) : 0;
+        ann_set_lr_scheduler(d->net, ann_lr_scheduler_cosine, &d->sched.cosine);
+    } else {
+        api->raise("lrSchedule kind must be step, exponential, cosine or none", "ArgumentError");
+        return 0;
+    }
+    return (ClayPluginValue)self;
+}
+
+/* validation(inputs, targets): held-out data whose loss is reported each epoch and
+ * watched by earlyStopping. Copied, so later changes to the tables don't matter. */
+static ClayPluginValue net_set_validation(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    NetData *d = nd_of(self, "validation");
+    if (argc < 2) { api->raise("validation needs inputs and targets", "ArgumentError"); return 0; }
+    int xo, yo;
+    PTensor x = tensor_arg(argv[0], "inputs", &xo);
+    PTensor y = tensor_arg(argv[1], "targets", &yo);
+    PTensor cx = xo ? x : tensor_copy(x);
+    PTensor cy = yo ? y : tensor_copy(y);
+    if (!cx || !cy || ann_set_validation_data(d->net, cx, cy) != ERR_OK) {
+        if (cx) tensor_free(cx);
+        if (cy) tensor_free(cy);
+        api->raise("validation: inputs and targets need the same, non-zero number of rows", "ArgumentError");
+        return 0;
+    }
+    if (d->val_x) tensor_free(d->val_x);
+    if (d->val_y) tensor_free(d->val_y);
+    d->val_x = cx;
+    d->val_y = cy;
+    return (ClayPluginValue)self;
+}
+
+/* earlyStopping(patience, minDelta = 0, restoreBest = true); patience 0 turns it off */
+static ClayPluginValue net_set_early(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "earlyStopping");
+    real patience = real_arg("earlyStopping", argc, argv, 0);
+    real delta = argc > 1 && !api->is_nil(argv[1]) ? real_arg("earlyStopping", argc, argv, 1) : 0;
+    int restore = !(argc > 2 && !api->is_nil(argv[2]) && argv[2] == api->make_bool(0));
+    if (patience < 0) { api->raise("earlyStopping: patience can't be negative", "ArgumentError"); return 0; }
+    ann_set_early_stopping(n, (unsigned)patience, delta, restore);
+    return (ClayPluginValue)self;
+}
+
+static ClayPluginValue net_epochs_trained(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    return api->make_int((intptr_t)ann_get_epochs_trained(net_of(self, "epochsTrained")));
+}
+static ClayPluginValue net_best_epoch(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    return api->make_int((intptr_t)ann_get_best_epoch(net_of(self, "bestEpoch")));
+}
+
+/* history -> one row per epoch trained: [loss, learningRate, validationLoss] (-1 without validation data) */
+static ClayPluginValue net_history(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    PNetwork n = net_of(self, "history");
+    unsigned count = ann_get_history_count(n);
+    if (count == 0) return api->array_new();
+    real *buf = (real *)malloc((size_t)count * 3 * sizeof(real));
+    real *a = (real *)malloc((size_t)count * sizeof(real));
+    real *b = (real *)malloc((size_t)count * sizeof(real));
+    real *c = (real *)malloc((size_t)count * sizeof(real));
+    if (!buf || !a || !b || !c) {
+        free(buf); free(a); free(b); free(c);
+        api->raise("ann: out of memory", "RuntimeError");
+        return 0;
+    }
+    ann_get_history(n, a, b, c, count);
+    for (unsigned i = 0; i < count; i++) { buf[3 * i] = a[i]; buf[3 * i + 1] = b[i]; buf[3 * i + 2] = c[i]; }
+    ClayPluginValue r = api->from_floats(buf, (size_t)count * 3, 3);
+    free(buf); free(a); free(b); free(c);
+    return r;
+}
+
+static ClayPluginValue net_clear_history(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    ann_clear_history(net_of(self, "clearHistory"));
+    return (ClayPluginValue)self;
+}
+
+/* learningCurve(path): the history as a CSV file */
+static ClayPluginValue net_learning_curve(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "learningCurve");
+    const char *path = str_arg(argc, argv, 0, NULL);
+    if (!path) { api->raise("learningCurve needs a file path", "ArgumentError"); return 0; }
+    if (ann_export_learning_curve(n, path) != ERR_OK) {
+        api->raise("ann: cannot write the learning curve (train first, and check the path)", "RuntimeError");
+        return 0;
+    }
+    return (ClayPluginValue)self;
+}
+
+/* --- evaluation ---------------------------------------------------------- */
+
+/* the outputs for every row of x (an AnnData or an Array of rows): a rows x outputs tensor */
+static PTensor run_batch(PNetwork n, PTensor x, const char *who) {
+    if (x->cols != input_size(n)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "%s: rows must have %d inputs (got %d)", who, input_size(n), x->cols);
+        api->raise(msg, "ArgumentError");
+        return NULL;
+    }
+    PTensor out = tensor_create(x->rows, output_size(n));
+    if (!out) { api->raise("ann: out of memory", "RuntimeError"); return NULL; }
+    if (ann_predict_batch(n, x->values, out->values, x->rows) != ERR_OK) {
+        tensor_free(out);
+        api->raise("ann: prediction failed", "RuntimeError");
+        return NULL;
+    }
+    return out;
+}
+
+/* net predictBatch(inputs) -> the outputs of every row: an AnnData for an AnnData, else an Array of rows */
+static ClayPluginValue net_predict_batch(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "predictBatch");
+    if (argc < 1) { api->raise("predictBatch needs inputs", "ArgumentError"); return 0; }
+    int xo;
+    PTensor x = tensor_arg(argv[0], "inputs", &xo);
+    PTensor out = run_batch(n, x, "predictBatch");
+    ClayPluginValue r = 0;
+    if (out) {
+        if (xo) {
+            r = api->from_floats(out->values, (size_t)out->rows * out->cols, (size_t)out->cols);
+            tensor_free(out);
+        } else {
+            r = data_wrap(out);
+        }
+    }
+    if (xo) tensor_free(x);
+    return r;
+}
+
+/* net classifyBatch(inputs) -> the index of the largest output for every row: a one-column
+ * AnnData for an AnnData, else an Array of integers */
+static ClayPluginValue net_classify_batch(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "classifyBatch");
+    if (argc < 1) { api->raise("classifyBatch needs inputs", "ArgumentError"); return 0; }
+    int xo;
+    PTensor x = tensor_arg(argv[0], "inputs", &xo);
+    PTensor out = run_batch(n, x, "classifyBatch");
+    ClayPluginValue r = 0;
+    if (out) {
+        int k = out->cols;
+        if (xo) {
+            r = api->array_new();
+            for (int i = 0; i < out->rows; i++)
+                api->array_push(r, api->make_int(ann_class_prediction(out->values + (size_t)i * k, k)));
+        } else {
+            PTensor labels = tensor_create(out->rows, 1);
+            if (labels)
+                for (int i = 0; i < out->rows; i++)
+                    labels->values[i] = (real)ann_class_prediction(out->values + (size_t)i * k, k);
+            r = data_wrap(labels);
+        }
+        tensor_free(out);
+    }
+    if (xo) tensor_free(x);
+    return r;
+}
+
+/* net confusionMatrix(inputs, targets) -> rows of counts: matrix[actual][predicted].
+ * targets are one-hot rows, or a single column of class numbers. */
+static ClayPluginValue net_confusion(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "confusionMatrix");
+    if (argc < 2) { api->raise("confusionMatrix needs inputs and targets", "ArgumentError"); return 0; }
+    int xo, yo;
+    PTensor x = tensor_arg(argv[0], "inputs", &xo);
+    PTensor y = tensor_arg(argv[1], "targets", &yo);
+    int k = output_size(n);
+    ClayPluginValue r = 0;
+    const char *err = NULL;
+    PTensor out = NULL;
+    if (x->rows != y->rows) err = "confusionMatrix: inputs and targets need the same number of rows";
+    else if (y->cols != k && y->cols != 1) err = "confusionMatrix: targets must be one-hot rows or one column of class numbers";
+    else out = run_batch(n, x, "confusionMatrix");
+    if (out) {
+        long *counts = (long *)calloc((size_t)k * k, sizeof(long));
+        if (!counts) err = "ann: out of memory";
+        for (int i = 0; counts && i < out->rows; i++) {
+            int actual = y->cols == 1 ? (int)y->values[i] : ann_class_prediction(y->values + (size_t)i * k, k);
+            int pred = ann_class_prediction(out->values + (size_t)i * k, k);
+            if (actual < 0 || actual >= k) { err = "confusionMatrix: a target class is out of range"; break; }
+            counts[(size_t)actual * k + pred]++;
+        }
+        if (counts && !err) {
+            r = api->array_new();
+            for (int a = 0; a < k; a++) {
+                ClayPluginValue row = api->array_new();
+                for (int p = 0; p < k; p++) {
+                    ClayPluginValue v = api->make_int((intptr_t)counts[(size_t)a * k + p]);
+                    api->array_push(row, v);
+                    api->release(v);
+                }
+                api->array_push(r, row);
+                api->release(row);
+            }
+        }
+        free(counts);
+        tensor_free(out);
+    }
+    if (xo) tensor_free(x);
+    if (yo) tensor_free(y);
+    if (err) { api->raise(err, "ArgumentError"); return 0; }
+    return r;
+}
+
+/* AnnNet backendInfo -> [blas, gpu, gpuActive, threads, bytesPerNumber, optimized] */
+static ClayPluginValue net_backend_info(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)self; (void)argc; (void)argv;
+    Backend_info info;
+    memset(&info, 0, sizeof(info));
+    ann_get_backend_info(&info);
+    ClayPluginValue r = api->array_new();
+    ClayPluginValue v[6];
+    v[0] = api->make_string(info.blas ? info.blas : "none");
+    v[1] = api->make_string(info.gpu ? info.gpu : "none");
+    v[2] = api->make_int(info.gpu_active);
+    v[3] = api->make_int(info.threads);
+    v[4] = api->make_int(info.real_bytes);
+    v[5] = api->make_int(info.optimized);
+    for (int i = 0; i < 6; i++) { api->array_push(r, v[i]); api->release(v[i]); }
+    return r;
+}
+
+/* AnnNet threads(n): the CPU threads libann's own loops use; with no argument, how many */
+static ClayPluginValue net_threads(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)self;
+    if (argc > 0) {
+        if (!api->is_int(argv[0]) || api->to_int(argv[0]) < 1) {
+            api->raise("threads needs a count of at least 1", "ArgumentError");
+            return 0;
+        }
+        ann_set_num_threads((int)api->to_int(argv[0]));
+    }
+    return api->make_int(ann_get_num_threads());
+}
+
+/* AnnNet version -> libann's version, e.g. "0.10.0" */
+static ClayPluginValue net_version(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)self; (void)argc; (void)argv;
+    return api->make_string(ann_get_version());
 }
 
 /* --- AnnData methods ---------------------------------------------------- */
@@ -494,12 +872,136 @@ static ClayPluginValue data_to_array(ClayPluginObject self, int argc, ClayPlugin
     return api->from_floats(t->values, (size_t)t->rows * (size_t)t->cols, (size_t)t->cols);
 }
 
+/* AnnData fromArray(rows) -> a table from an Array of rows of numbers */
+static ClayPluginValue data_from_array(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)self;
+    if (argc < 1) { api->raise("fromArray needs an Array of rows", "ArgumentError"); return 0; }
+    return data_wrap(tensor_from(argv[0], "rows"));
+}
+
+/* data shuffle -> the rows in random order (repeatable after Ann seed) */
+static ClayPluginValue data_shuffle(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    PTensor t = self_tensor(self, "shuffle");
+    if (!t) return 0;
+    PTensor r = tensor_copy(t);
+    if (!r) { api->raise("ann: out of memory", "RuntimeError"); return 0; }
+    size_t cols = (size_t)r->cols;
+    real *tmp = (real *)malloc(cols * sizeof(real));
+    if (!tmp) { tensor_free(r); api->raise("ann: out of memory", "RuntimeError"); return 0; }
+    for (int i = r->rows - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        if (j == i) continue;
+        memcpy(tmp, r->values + (size_t)i * cols, cols * sizeof(real));
+        memcpy(r->values + (size_t)i * cols, r->values + (size_t)j * cols, cols * sizeof(real));
+        memcpy(r->values + (size_t)j * cols, tmp, cols * sizeof(real));
+    }
+    free(tmp);
+    return data_wrap(r);
+}
+
+/* data split(fraction) -> [first, rest]: the first rows (fraction of them, e.g. 0.8) and the others */
+static ClayPluginValue data_split(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PTensor t = self_tensor(self, "split");
+    if (!t) return 0;
+    if (argc < 1 || !(api->is_int(argv[0]) || api->is_float(argv[0]))) {
+        api->raise("split needs a fraction between 0 and 1", "ArgumentError");
+        return 0;
+    }
+    double f = (double)api->to_float(argv[0]);
+    int cut = (int)(f * t->rows + 0.5);
+    if (!(f > 0 && f < 1) || cut < 1 || cut >= t->rows) {
+        api->raise("split: the fraction must leave rows on both sides", "ArgumentError");
+        return 0;
+    }
+    ClayPluginValue a = data_wrap(sub_table(t, 0, cut, 0, t->cols));
+    ClayPluginValue b = data_wrap(sub_table(t, cut, t->rows, 0, t->cols));
+    ClayPluginValue r = api->array_new();
+    api->array_push(r, a); api->release(a);
+    api->array_push(r, b); api->release(b);
+    return r;
+}
+
+/* the mean and standard deviation of every column */
+static void column_stats(PTensor t, double *mean, double *sd) {
+    for (int c = 0; c < t->cols; c++) {
+        double sum = 0, sq = 0;
+        for (int i = 0; i < t->rows; i++) {
+            double v = t->values[(size_t)i * t->cols + c];
+            sum += v;
+            sq += v * v;
+        }
+        mean[c] = sum / t->rows;
+        double var = sq / t->rows - mean[c] * mean[c];
+        sd[c] = var > 0 ? sqrt(var) : 0;
+    }
+}
+
+static ClayPluginValue data_stat(ClayPluginObject self, const char *who, int want_sd) {
+    PTensor t = self_tensor(self, who);
+    if (!t) return 0;
+    double *mean = (double *)malloc((size_t)t->cols * sizeof(double));
+    double *sd = (double *)malloc((size_t)t->cols * sizeof(double));
+    real *out = (real *)malloc((size_t)t->cols * sizeof(real));
+    if (!mean || !sd || !out) { free(mean); free(sd); free(out); api->raise("ann: out of memory", "RuntimeError"); return 0; }
+    column_stats(t, mean, sd);
+    for (int c = 0; c < t->cols; c++) out[c] = (real)(want_sd ? sd[c] : mean[c]);
+    ClayPluginValue r = api->from_floats(out, (size_t)t->cols, 0);
+    free(mean); free(sd); free(out);
+    return r;
+}
+/* data mean -> the mean of each column, an Array */
+static ClayPluginValue data_mean(ClayPluginObject s, int c, ClayPluginValue *v) { (void)c; (void)v; return data_stat(s, "mean", 0); }
+/* data std -> the standard deviation of each column, an Array */
+static ClayPluginValue data_std(ClayPluginObject s, int c, ClayPluginValue *v) { (void)c; (void)v; return data_stat(s, "std", 1); }
+
+/* data standardize -> a copy with each column shifted to mean 0 and scaled to standard
+ * deviation 1 (a column that never varies is only shifted) */
+static ClayPluginValue data_standardize(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    PTensor t = self_tensor(self, "standardize");
+    if (!t) return 0;
+    PTensor r = tensor_copy(t);
+    double *mean = (double *)malloc((size_t)t->cols * sizeof(double));
+    double *sd = (double *)malloc((size_t)t->cols * sizeof(double));
+    if (!r || !mean || !sd) {
+        if (r) tensor_free(r);
+        free(mean); free(sd);
+        api->raise("ann: out of memory", "RuntimeError");
+        return 0;
+    }
+    column_stats(t, mean, sd);
+    for (int i = 0; i < r->rows; i++)
+        for (int c = 0; c < r->cols; c++) {
+            real *v = &r->values[(size_t)i * r->cols + c];
+            *v = (real)((*v - mean[c]) / (sd[c] > 0 ? sd[c] : 1));
+        }
+    free(mean); free(sd);
+    return data_wrap(r);
+}
+
+/* data argmax -> a one-column table: the index of the largest value in each row */
+static ClayPluginValue data_argmax(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    PTensor t = self_tensor(self, "argmax");
+    if (!t) return 0;
+    PTensor r = tensor_create(t->rows, 1);
+    if (r)
+        for (int i = 0; i < t->rows; i++)
+            r->values[i] = (real)ann_class_prediction(t->values + (size_t)i * t->cols, t->cols);
+    return data_wrap(r);
+}
+
 static ClayPluginMethod data_methods[] = {
     { "loadCsv", data_load_csv },   { "rows", data_rows },
     { "cols", data_cols },          { "slice", data_slice },
     { "columns", data_columns },    { "column", data_column },
     { "oneHot", data_one_hot },     { "scale", data_scale },
     { "row", data_row },            { "toArray", data_to_array },
+    { "fromArray", data_from_array },{ "shuffle", data_shuffle },
+    { "split", data_split },        { "mean", data_mean },
+    { "std", data_std },            { "standardize", data_standardize },
+    { "argmax", data_argmax },
     { NULL, NULL }
 };
 
@@ -514,6 +1016,17 @@ static ClayPluginMethod methods[] = {
     { "convergence", net_set_convergence }, { "quiet", net_quiet },
     { "sizes", net_sizes },         { "save", net_save },
     { "load", net_load },           { "seed", net_seed },
+    { "weightDecay", net_set_weight_decay }, { "l1", net_set_l1 },
+    { "gradientClip", net_set_clip },        { "dropout", net_set_dropout },
+    { "weightInit", net_set_weight_init },   { "lossReduction", net_set_loss_reduction },
+    { "inputNoise", net_set_noise },         { "lrSchedule", net_set_schedule },
+    { "validation", net_set_validation },    { "earlyStopping", net_set_early },
+    { "epochsTrained", net_epochs_trained }, { "bestEpoch", net_best_epoch },
+    { "history", net_history },              { "clearHistory", net_clear_history },
+    { "learningCurve", net_learning_curve },
+    { "predictBatch", net_predict_batch },   { "classifyBatch", net_classify_batch },
+    { "confusionMatrix", net_confusion },    { "backendInfo", net_backend_info },
+    { "threads", net_threads },              { "version", net_version },
     { NULL, NULL }
 };
 
