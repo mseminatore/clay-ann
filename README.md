@@ -273,6 +273,15 @@ them; `Ann version` is libann's version.
 - [`examples/xor.clay`](examples/xor.clay): the classic problem a single layer can't learn.
 - [`examples/digits.clay`](examples/digits.clay): recognizes 5×7 pixel digits, then the same digits
   with pixels flipped.
+- [`examples/mnist.clay`](examples/mnist.clay): handwritten digits from the MNIST CSV files, with a
+  dense network or (`--cnn`) a small convolutional one: `Ann loadCsv`, a validation split, `fit`
+  with early stopping, a confusion matrix and saving the model. About 98% test accuracy in a couple
+  of seconds on a Mac. With one file it holds back a fifth as the test set, so it also runs on the
+  Fashion-MNIST file that comes with libann, with nothing to download:
+
+  ```sh
+  clay bricks/ann/examples/mnist.clay bricks/ann/native/libann/data/fashion-mnist_test.csv
+  ```
 
 ## Development
 

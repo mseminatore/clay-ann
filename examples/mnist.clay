@@ -1,0 +1,168 @@
+// MNIST: learn to read handwritten digits from a CSV file of images
+//
+//   clay mnist.clay train.csv [test.csv] [--cnn] [--epochs n] [--save model.bin] [--no-header]
+//
+// Each row is a label (0-9) followed by the 784 pixels (0-255) of a 28x28 image, under a header
+// line (pass --no-header if the files have none). With one file, a fifth of it is held back as
+// the test set. Fashion-MNIST has the same format, and libann ships a file of it, so this runs
+// with nothing to download:
+//
+//   clay bricks/ann/examples/mnist.clay bricks/ann/native/libann/data/fashion-mnist_test.csv
+import("ann")
+
+files = []
+cnn = false
+epochs = 10
+savePath = nil
+header = true
+args = System args
+i = 0
+{ i < args size } whileTrue {
+    arg = args at(i)
+    known = false
+    (arg == "--cnn") ifTrue { cnn = true; known = true }
+    (arg == "--no-header") ifTrue { header = false; known = true }
+    (arg == "--epochs") ifTrue { i = i + 1; epochs = (args at(i)) toInt; known = true }
+    (arg == "--save") ifTrue { i = i + 1; savePath = args at(i); known = true }
+    known ifFalse { files push(arg) }
+    i = i + 1
+}
+(files size == 0 || files size > 2) ifTrue {
+    "usage: clay mnist.clay train.csv [test.csv] [--cnn] [--epochs n] [--save model.bin] [--no-header]" println
+    System exit(1)
+}
+
+// --- data: column 0 is the label, the rest are pixels scaled to 0..1 -------------------------
+
+Ann seed(1)
+train = Ann loadCsv(files at(0), header)
+test = nil
+(files size == 2) ifTrue {
+    test = Ann loadCsv(files at(1), header)
+} ifFalse {
+    parts = train shuffle split(0.8)
+    train = parts at(0)
+    test = parts at(1)
+}
+// a tenth of the training rows are held out to watch for overfitting while training
+parts = train shuffle split(0.9)
+xTrain = ((parts at(0)) columns(1)) scale(255)
+yTrain = ((parts at(0)) column(0)) oneHot(10)
+xValid = ((parts at(1)) columns(1)) scale(255)
+yValid = ((parts at(1)) column(0)) oneHot(10)
+xTest = (test columns(1)) scale(255)
+labels = test column(0)
+yTest = labels oneHot(10)
+("${xTrain rows} training, ${xValid rows} validation and ${xTest rows} test images") println
+
+// --- network ---------------------------------------------------------------------------------
+
+net = Ann network(#{"loss": "cross_entropy", "learningRate": 0.001, "quiet": true})
+cnn ifTrue {
+    net input(1, 28, 28)
+    net conv2d(8, 3, "relu")
+    net maxPool2d(2)
+    net conv2d(16, 3, "relu")
+    net maxPool2d(2)
+    net flatten
+    net dense(64, "relu")
+} ifFalse {
+    net input(784)
+    net dense(128, "relu")
+}
+net output(10, "softmax")
+net summary println
+
+// --- training: stops early once the validation loss hasn't improved for two epochs -----------
+
+round3 = { |n| Math round(n * 1000) / 1000.0 }
+percent = { |n| (Math round(n * 10000) / 100.0) toString + "%" }
+
+started = System clock                  // milliseconds
+history = net fit(xTrain, yTrain, #{
+    "epochs": epochs,
+    "batchSize": 32,
+    "validation": [xValid, yValid],
+    "patience": 2,
+    "onEpoch": { |e|
+        epoch = e get("epoch")
+        loss = round3 value(e get("loss"))
+        valLoss = round3 value(e get("valLoss"))
+        valAcc = percent value(net accuracy(xValid, yValid))
+        ("epoch ${epoch}: loss ${loss}, validation loss ${valLoss}, accuracy ${valAcc}") println
+    }
+})
+
+seconds = (System clock - started) / 1000.0
+("trained ${history size} epochs in ${seconds}s") println
+
+// --- results ---------------------------------------------------------------------------------
+
+testAcc = percent value(net accuracy(xTest, yTest))
+("test accuracy: ${testAcc}") println
+
+// confusion matrix: a row per actual class, a column per predicted class
+matrix = net confusionMatrix(xTest, yTest)
+"\nactual \\ predicted" println
+("     " + ([0, 1, 2, 3, 4, 5, 6, 7, 8, 9] map { |c| c toString padLeft(5, " ") }) join("")) println
+worst = 0
+worstPair = nil
+actual = 0
+
+matrix each { |counts|
+    ("  " + actual toString + ": " + (counts map { |n| n toString padLeft(5, " ") }) join("")) println
+    predicted = 0
+    counts each { |n|
+        (predicted != actual && n > worst) ifTrue { worst = n; worstPair = [actual, predicted] }
+        predicted = predicted + 1
+    }
+    actual = actual + 1
+}
+
+(worstPair != nil) ifTrue {
+    was = worstPair at(0)
+    seen = worstPair at(1)
+    ("most common mistake: ${was} read as ${seen} (${worst} times)") println
+}
+
+// the first test image the network gets wrong, drawn with every other row of pixels
+guesses = net classifyBatch(xTest)
+miss = nil
+i = 0
+
+{ miss == nil && i < xTest rows } whileTrue {
+    (((guesses row(i)) at(0)) != ((labels row(i)) at(0))) ifTrue { miss = i }
+    i = i + 1
+}
+
+(miss != nil) ifTrue {
+    was = ((labels row(miss)) at(0)) toInt
+    seen = ((guesses row(miss)) at(0)) toInt
+    
+    ("\ntest image ${miss} is a ${was}, read as ${seen}:") println
+    
+    pixels = xTest row(miss)
+    shades = " .:*#"
+    y = 0
+
+    { y < 28 } whileTrue {
+        line = ""
+        x = 0
+        
+        { x < 28 } whileTrue {
+            line = line + shades at(Math floor((pixels at(y * 28 + x)) * 4.99))
+            x = x + 1
+        }
+
+        line println
+        y = y + 2
+    }
+}
+
+// --- saving: the reloaded network gives the same answers -------------------------------------
+
+(savePath != nil) ifTrue {
+    net saveBinary(savePath)
+    again = percent value((Ann loadBinary(savePath)) accuracy(xTest, yTest))
+    ("\nsaved to ${savePath} (${File size(savePath)} bytes); reloaded, test accuracy is ${again}") println
+}
