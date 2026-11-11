@@ -24,6 +24,8 @@ static const ClayPluginAPI *api;
 typedef struct {
     PNetwork net;
     PTensor val_x, val_y;
+    real *snap;             /* the weights kept by snapshot, or NULL */
+    size_t snap_count;
     union {
         LRStepParams step;
         LRExponentialParams expo;
@@ -619,6 +621,7 @@ static void net_free(void *data) {
     ann_free_network(d->net);          /* before the tensors it borrows */
     if (d->val_x) tensor_free(d->val_x);
     if (d->val_y) tensor_free(d->val_y);
+    free(d->snap);
     free(d);
 }
 
@@ -790,6 +793,67 @@ static ClayPluginValue net_epochs_trained(ClayPluginObject self, int argc, ClayP
 static ClayPluginValue net_best_epoch(ClayPluginObject self, int argc, ClayPluginValue *argv) {
     (void)argc; (void)argv;
     return api->make_int((intptr_t)ann_get_best_epoch(net_of(self, "bestEpoch")));
+}
+
+/* Every parameter of every layer, in order: counted (buf NULL), copied out to buf, or
+ * (restore) copied back from it. Returns the number of values, or -1 if libann refuses. */
+static long params_copy(PNetwork n, real *buf, int restore) {
+    long total = 0;
+    int layers = ann_get_layer_count(n);
+    for (int layer = 1; layer < layers; layer++) {
+        int params = ann_get_layer_param_count(n, layer);
+        for (int p = 0; p < params; p++) {
+            int rows = 0, cols = 0;
+            if (ann_get_layer_param_shape(n, layer, p, &rows, &cols) != ERR_OK) return -1;
+            int count = rows * cols;
+            if (buf) {
+                int rc = restore ? ann_set_layer_param(n, layer, p, buf + total, count)
+                                 : ann_get_layer_param(n, layer, p, buf + total, count);
+                if (rc != ERR_OK) return -1;
+            }
+            total += count;
+        }
+    }
+    return total;
+}
+
+/* net snapshot: remember the weights as they are now (replacing any earlier snapshot),
+ * for `restore` to put back: the best epoch of a training loop, say */
+static ClayPluginValue net_snapshot(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    NetData *d = nd_of(self, "snapshot");
+    if (!d) return 0;
+    long count = params_copy(d->net, NULL, 0);
+    if (count <= 0) { api->raise("snapshot: the network has no weights (add layers first)", "RuntimeError"); return 0; }
+    if ((size_t)count != d->snap_count || !d->snap) {
+        real *buf = (real *)realloc(d->snap, (size_t)count * sizeof(real));
+        if (!buf) { api->raise("snapshot: out of memory", "RuntimeError"); return 0; }
+        d->snap = buf;
+        d->snap_count = (size_t)count;
+    }
+    if (params_copy(d->net, d->snap, 0) != count) {
+        free(d->snap); d->snap = NULL; d->snap_count = 0;
+        api->raise("snapshot: cannot read the weights", "RuntimeError");
+        return 0;
+    }
+    return (ClayPluginValue)self;
+}
+
+/* net restore: put back the weights kept by `snapshot` (which stays, so it can be restored again) */
+static ClayPluginValue net_restore(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    NetData *d = nd_of(self, "restore");
+    if (!d) return 0;
+    if (!d->snap) { api->raise("restore: nothing to restore (call snapshot first)", "RuntimeError"); return 0; }
+    if (params_copy(d->net, NULL, 0) != (long)d->snap_count) {
+        api->raise("restore: the network's layers changed since the snapshot", "RuntimeError");
+        return 0;
+    }
+    if (params_copy(d->net, d->snap, 1) != (long)d->snap_count) {
+        api->raise("restore: cannot set the weights", "RuntimeError");
+        return 0;
+    }
+    return (ClayPluginValue)self;
 }
 
 /* history -> one row per epoch trained: [loss, learningRate, validationLoss] (-1 without validation data) */
@@ -1621,6 +1685,7 @@ static ClayPluginMethod methods[] = {
     { "inputNoise", net_set_noise },         { "lrSchedule", net_set_schedule },
     { "validation", net_set_validation },    { "earlyStopping", net_set_early },
     { "epochsTrained", net_epochs_trained }, { "bestEpoch", net_best_epoch },
+    { "snapshot", net_snapshot },            { "restore", net_restore },
     { "history", net_history },              { "clearHistory", net_clear_history },
     { "learningCurve", net_learning_curve },
     { "predictBatch", net_predict_batch },   { "classifyBatch", net_classify_batch },

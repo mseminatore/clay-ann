@@ -1,6 +1,6 @@
 {
   "name": "ann",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Neural networks for Clay: a native brick over libann",
   "main": "src/main.clay",
   "deps": {},

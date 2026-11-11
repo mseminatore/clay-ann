@@ -73,7 +73,7 @@ cnn ifTrue {
 net output(10, "softmax")
 net summary println
 
-// --- training: stops early once the validation loss hasn't improved for two epochs -----------
+// --- training: stops after two epochs without a better validation loss, keeping the best ----
 
 round3 = { |n| Math round(n * 1000) / 1000.0 }
 percent = { |n| (Math round(n * 10000) / 100.0) toString + "%" }

@@ -208,10 +208,10 @@ history = net fit(x, y, #{
 | `validation` | `[inputs, targets]` held out; their loss is measured after each epoch |
 | `lrSchedule` | the same forms as the `network` option, applied per epoch |
 | `patience`, `minDelta` | stop after `patience` epochs without the loss (the validation loss, if there is one) improving by more than `minDelta` |
+| `restoreBest` | finish with the weights of the epoch whose loss (the validation loss, if there is one) was lowest, not the last epoch's. Default: `true` with `patience`, as for `earlyStopping`; otherwise `false` |
 | `onEpoch` | a block called after each epoch with a Dict of `epoch`, `loss`, `valLoss` (-1 without validation data) and `lr`; returning `false` stops the training |
 
 `fit` returns the history, one such Dict per epoch, and puts the learning rate back as it was.
-Unlike `train`, it does not restore the best weights when it stops early.
 
 The pieces are available directly, for custom batching, streaming data or several networks in
 step:
@@ -221,6 +221,7 @@ step:
 | `trainEpoch(inputs, targets, batchSize, shuffle)` | one pass in mini-batches; returns the mean loss |
 | `trainBegin`, `trainStep(inputs, targets)`, `trainEnd` | an online session: `trainStep` updates the weights on one mini-batch of any size and returns its loss |
 | `learningRate`, `learningRate(r)` | read or set the learning rate |
+| `snapshot`, `restore` | `snapshot` remembers the weights as they are now (one snapshot per network; a new one replaces it) and `restore` puts them back. `fit`'s `restoreBest` uses them |
 | `Ann scheduledRate(spec, base, epoch)` | the rate a schedule gives an epoch |
 
 Optimizer state (such as Adam's moments) carries over between steps and epochs. These methods use

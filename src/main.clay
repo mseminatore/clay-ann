@@ -180,6 +180,84 @@ Ann = Object clone {
             row
         }
     }
+
+    // The bodies of AnnNet's fit, layers and summary (below). They are methods here because a
+    // method's variables are its own, while a top-level block's assignments would write the
+    // caller's top-level variables of the same names (epochs, loss, history, ...).
+    _fit(net, x, y, options) {
+        o = options ?? #{}
+        epochs = (o get("epochs")) ?? 10
+        batch = o get("batchSize")
+        shuffle = ((o get("shuffle")) == false) ifTrue { false } ifFalse { true }
+        valid = o get("validation")
+        schedule = o get("lrSchedule")
+        patience = (o get("patience")) ?? 0
+        minDelta = (o get("minDelta")) ?? 0
+        onEpoch = o get("onEpoch")
+        keepBest = (o get("restoreBest")) ?? (patience > 0)
+        lowest = nil
+        lowestAt = 0
+        base = net learningRate
+        history = []
+        best = nil
+        stale = 0
+        epoch = 1
+        running = epochs > 0
+        { running } whileTrue {
+            (schedule != nil) ifTrue { net learningRate(Ann scheduledRate(schedule, base, epoch)) }
+            loss = net trainEpoch(x, y, batch, shuffle)
+            val = (valid == nil) ifTrue { -1 } ifFalse { net evaluate(valid at(0), valid at(1)) }
+            entry = #{"epoch": epoch, "loss": loss, "valLoss": val, "lr": net learningRate}
+            history push(entry)
+            seen = (valid == nil) ifTrue { loss } ifFalse { val }
+            (keepBest && ((lowest == nil) || (seen < lowest))) ifTrue {
+                lowest = seen
+                lowestAt = epoch
+                net snapshot
+            }
+            (onEpoch != nil) ifTrue {
+                ((onEpoch value(entry)) == false) ifTrue { running = false }
+            }
+            (patience > 0) ifTrue {
+                ((best == nil) || (seen < best - minDelta)) ifTrue { best = seen; stale = 0 } ifFalse { stale = stale + 1 }
+                (stale >= patience) ifTrue { running = false }
+            }
+            epoch = epoch + 1
+            (epoch > epochs) ifTrue { running = false }
+        }
+        (keepBest && lowestAt > 0 && lowestAt < history size) ifTrue { net restore }
+        net learningRate(base)
+        history
+    }
+
+    _layers(net) {
+        info = net layerInfo
+        info map { |r|
+            #{"kind": r at(0), "shape": [r at(1), r at(2), r at(3)], "activation": r at(4), "params": r at(5)}
+        }
+    }
+
+    _summary(net) {
+        cell = { |text, width|
+            t = text toString
+            { t length < width } whileTrue { t = t + " " }
+            t
+        }
+        out = (cell value("#", 4)) + (cell value("layer", 18)) + (cell value("output shape", 16)) +
+              (cell value("activation", 12)) + "params\n"
+        total = 0
+        i = 0
+        (net layers) each { |l|
+            sh = l get("shape")
+            shape = (sh at(0)) toString + "x" + (sh at(1)) toString + "x" + (sh at(2)) toString
+            ((sh at(1)) == 1 && (sh at(2)) == 1) ifTrue { shape = (sh at(0)) toString }
+            out = out + (cell value(i, 4)) + (cell value(l get("kind"), 18)) + (cell value(shape, 16)) +
+                  (cell value(l get("activation"), 12)) + (l get("params")) toString + "\n"
+            total = total + (l get("params"))
+            i = i + 1
+        }
+        out + "total parameters: " + total toString
+    }
 }
 
 // net fit(inputs, targets, options): train epoch by epoch from Clay, so a block can watch
@@ -192,78 +270,20 @@ Ann = Object clone {
 //   lrSchedule: ["step", stepSize, gamma], ["exponential", gamma] or ["cosine", tMax, minLr]
 //   patience: stop after this many epochs without the loss (the validation loss, if there is
 //     one) improving by more than minDelta (default 0)
+//   restoreBest: finish with the weights of the epoch whose loss (the validation loss, if
+//     there is one) was lowest, rather than the last epoch's. Default: true with patience,
+//     as for train's earlyStopping, else false. It uses the network's snapshot.
 //   onEpoch: a block called after each epoch with a Dict of epoch, loss, valLoss (-1 without
 //     validation data) and lr; it stops the training by returning false
 // Returns the history: an Array with one such Dict per epoch. The learning rate is back to
-// what it was when fit returns. Unlike train, fit does not restore the best weights.
-AnnNet setMethod("fit", { |x, y, options|
-    net = self
-    o = options ?? #{}
-    epochs = (o get("epochs")) ?? 10
-    batch = o get("batchSize")
-    shuffle = ((o get("shuffle")) == false) ifTrue { false } ifFalse { true }
-    valid = o get("validation")
-    schedule = o get("lrSchedule")
-    patience = (o get("patience")) ?? 0
-    minDelta = (o get("minDelta")) ?? 0
-    onEpoch = o get("onEpoch")
-    base = net learningRate
-    history = []
-    best = nil
-    stale = 0
-    epoch = 1
-    running = epochs > 0
-    { running } whileTrue {
-        (schedule != nil) ifTrue { net learningRate(Ann scheduledRate(schedule, base, epoch)) }
-        loss = net trainEpoch(x, y, batch, shuffle)
-        val = (valid == nil) ifTrue { -1 } ifFalse { net evaluate(valid at(0), valid at(1)) }
-        entry = #{"epoch": epoch, "loss": loss, "valLoss": val, "lr": net learningRate}
-        history push(entry)
-        (onEpoch != nil) ifTrue {
-            ((onEpoch value(entry)) == false) ifTrue { running = false }
-        }
-        (patience > 0) ifTrue {
-            seen = (valid == nil) ifTrue { loss } ifFalse { val }
-            ((best == nil) || (seen < best - minDelta)) ifTrue { best = seen; stale = 0 } ifFalse { stale = stale + 1 }
-            (stale >= patience) ifTrue { running = false }
-        }
-        epoch = epoch + 1
-        (epoch > epochs) ifTrue { running = false }
-    }
-    net learningRate(base)
-    history
-})
+// what it was when fit returns.
+AnnNet setMethod("fit", { |x, y, options| Ann _fit(self, x, y, options) })
 
 // net layers: one Dict per layer, input first: kind ("input", "dense", "conv2d", "maxpool2d",
 // "flatten", ...), shape ([channels, height, width]; dense layers are [nodes, 1, 1]),
 // activation and params (the number of weights and biases)
-AnnNet setMethod("layers", {
-    info = self layerInfo
-    info map { |r|
-        #{"kind": r at(0), "shape": [r at(1), r at(2), r at(3)], "activation": r at(4), "params": r at(5)}
-    }
-})
+AnnNet setMethod("layers", { Ann _layers(self) })
 
 // net summary: the layers as a table of text, with the total number of parameters.
 // Print it with `net summary println`.
-AnnNet setMethod("summary", {
-    cell = { |text, width|
-        t = text toString
-        { t length < width } whileTrue { t = t + " " }
-        t
-    }
-    out = (cell value("#", 4)) + (cell value("layer", 18)) + (cell value("output shape", 16)) +
-          (cell value("activation", 12)) + "params\n"
-    total = 0
-    i = 0
-    (self layers) each { |l|
-        sh = l get("shape")
-        shape = (sh at(0)) toString + "x" + (sh at(1)) toString + "x" + (sh at(2)) toString
-        ((sh at(1)) == 1 && (sh at(2)) == 1) ifTrue { shape = (sh at(0)) toString }
-        out = out + (cell value(i, 4)) + (cell value(l get("kind"), 18)) + (cell value(shape, 16)) +
-              (cell value(l get("activation"), 12)) + (l get("params")) toString + "\n"
-        total = total + (l get("params"))
-        i = i + 1
-    }
-    out + "total parameters: " + total toString
-})
+AnnNet setMethod("summary", { Ann _summary(self) })

@@ -288,6 +288,44 @@ valid = fnet fit(xs, ys, #{"epochs": 2, "validation": [xs, ys]})
 check value("fit measures validation loss", ((valid at(0)) get("valLoss")) >= 0)
 check value("fit without options", (fnet fit(xs, ys)) size == 10)
 check value("fit zero epochs", (fnet fit(xs, ys, #{"epochs": 0})) size == 0)
+
+// fit, layers and summary keep their variables to themselves
+stale = "mine"; entry = "mine"; running = "mine"; total = "mine"; info = "mine"
+fnet fit(xs, ys, #{"epochs": 2, "patience": 1})
+fnet summary
+check value("fit and summary leave the caller's variables alone",
+            [stale, entry, running, total, info] == ["mine", "mine", "mine", "mine", "mine"])
+
+// snapshot / restore: the weights come back exactly
+before = (fnet predict([0, 1])) at(0)
+fnet snapshot
+fnet fit(xs, ys, #{"epochs": 5})
+check value("training moved the weights", ((fnet predict([0, 1])) at(0)) != before)
+check value("restore returns the network", (fnet restore) == fnet)
+check value("restore puts the snapshot back", ((fnet predict([0, 1])) at(0)) == before)
+fnet restore
+check value("restore works again", ((fnet predict([0, 1])) at(0)) == before)
+bare = Ann network(#{})
+bare input(2)
+bare output(1, "sigmoid")
+check value("restore without a snapshot", (raises value({ bare restore })) == "RuntimeError")
+
+// restoreBest: validation targets that are the opposite of the training targets get worse
+// as the network learns, so the best epoch is an early one, not the last
+near = { |a, b| (a - b) abs < 0.00001 }
+lowestVal = { |h| (h map { |e| e get("valLoss") }) min }
+wrong = ys map { |r| [1 - (r at(0))] }
+kept = fnet fit(xs, wrong, #{"epochs": 6, "validation": [xs, ys], "restoreBest": true})
+check value("restoreBest ends on the lowest validation loss", near value(fnet evaluate(xs, ys), lowestVal value(kept)))
+check value("the best epoch wasn't the last", ((kept last) get("valLoss")) > (lowestVal value(kept)))
+last = fnet fit(xs, wrong, #{"epochs": 6, "validation": [xs, ys]})
+check value("without it fit ends on the last epoch", near value(fnet evaluate(xs, ys), (last last) get("valLoss")))
+early = fnet fit(xs, wrong, #{"epochs": 50, "validation": [xs, ys], "patience": 2})
+check value("patience restores the best by default", early size < 50 && (near value(fnet evaluate(xs, ys), lowestVal value(early))))
+off = fnet fit(xs, wrong, #{"epochs": 50, "validation": [xs, ys], "patience": 2, "restoreBest": false})
+check value("restoreBest false keeps the last epoch", near value(fnet evaluate(xs, ys), (off last) get("valLoss")))
+plain = fnet fit(xs, ys, #{"epochs": 6, "restoreBest": true})
+check value("restoreBest follows the training loss without validation", (plain size) == 6)
 xorOk = { |n| ((n predict([0, 1])) at(0)) > 0.8 && ((n predict([1, 1])) at(0)) < 0.2 }
 xnet = learned value({
     n = Ann network(#{"learningRate": 0.5})
