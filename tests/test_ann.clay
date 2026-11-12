@@ -47,7 +47,11 @@ path = dir + "/xor.nna"
 net save(path)
 copy = Ann load(path)
 check value("loaded sizes", copy sizes == [2, 4, 1])
-check value("loaded predictions match", (copy predict([1, 0])) == (net predict([1, 0])))
+// (libann writes weights with 9 significant digits, which is exact for a float; the comparison
+// still allows a rounding error, so a platform's math library can't make this test flaky)
+trainedOut = (net predict([1, 0])) at(0)
+loadedOut = (copy predict([1, 0])) at(0)
+check value("loaded predictions match", (trainedOut - loadedOut) abs < 0.00001)
 File delete(path)
 File delete(dir)
 
