@@ -19,7 +19,7 @@ learned = { |build, pass|
     { passed == false && trySeed <= 8 } whileTrue {
         Ann seed(trySeed)
         tried = build value
-        passed = pass value(tried)
+        passed = pass(tried)
         trySeed = trySeed + 1
     }
     tried
@@ -28,70 +28,70 @@ learned = { |build, pass|
 xs = [[0, 0], [0, 1], [1, 0], [1, 1]]
 ys = [[0], [1], [1], [0]]
 loss = 1
-net = learned value({
+net = learned({
     n = Ann network(#{"learningRate": 0.5, "epochs": 4000, "convergence": 0.001, "quiet": true})
     n input(2)
     n dense(4, "sigmoid")
     n output(1, "sigmoid")
     n
 }, { |n| loss = n train(xs, ys); loss < 0.01 })
-check value("layer sizes", net sizes == [2, 4, 1])
-check value("trained below the convergence limit", loss < 0.01)
-check value("predict returns the outputs", (net predict([0, 1])) size == 1)
-check value("xor learned", ((net predict([0, 1])) at(0)) > 0.8 && ((net predict([1, 1])) at(0)) < 0.2)
-check value("evaluate is the loss", (net evaluate(xs, ys)) < 0.05)
+check("layer sizes", net sizes == [2, 4, 1])
+check("trained below the convergence limit", loss < 0.01)
+check("predict returns the outputs", (net predict([0, 1])) size == 1)
+check("xor learned", ((net predict([0, 1])) at(0)) > 0.8 && ((net predict([1, 1])) at(0)) < 0.2)
+check("evaluate is the loss", (net evaluate(xs, ys)) < 0.05)
 
 // save and load reproduce the network
 dir = File tempDir
 path = dir + "/xor.nna"
 net save(path)
 copy = Ann load(path)
-check value("loaded sizes", copy sizes == [2, 4, 1])
+check("loaded sizes", copy sizes == [2, 4, 1])
 // (libann writes weights with 9 significant digits, which is exact for a float; the comparison
 // still allows a rounding error, so a platform's math library can't make this test flaky)
 trainedOut = (net predict([1, 0])) at(0)
 loadedOut = (copy predict([1, 0])) at(0)
-check value("loaded predictions match", (trainedOut - loadedOut) abs < 0.00001)
+check("loaded predictions match", (trainedOut - loadedOut) abs < 0.00001)
 File delete(path)
 File delete(dir)
 
 // classification helpers
-check value("oneHot", Ann oneHot([2, 0], 3) == [[0, 0, 1], [1, 0, 0]])
+check("oneHot", Ann oneHot([2, 0], 3) == [[0, 0, 1], [1, 0, 0]])
 
 // AnnData: tables of numbers kept in C
 dir = File tempDir
 csv = dir + "/data.csv"
 File write(csv, "label,a,b\n2,0,255\n0,51,102\n1,255,0\n")
 d = Ann loadCsv(csv, true)
-check value("loadCsv shape", d rows == 3 && d cols == 3)
-check value("loadCsv values", d row(1) == [0, 51, 102])
+check("loadCsv shape", d rows == 3 && d cols == 3)
+check("loadCsv values", d row(1) == [0, 51, 102])
 labels = d column(0)
 pixels = (d columns(1)) scale(255)
-check value("columns", pixels cols == 2 && pixels rows == 3)
-check value("scale", pixels row(0) == [0, 1] && (pixels row(1)) == [0.2, 0.4])
-check value("slice", (d slice(1, 3)) rows == 2 && ((d slice(2)) row(0)) == [1, 255, 0])
-check value("oneHot table", ((labels oneHot(3)) toArray) == [[0, 0, 1], [1, 0, 0], [0, 1, 0]])
-check value("toArray", (labels toArray) == [[2], [0], [1]])
-check value("oneHot label out of range", (raises value({ labels oneHot(2) })) == "ArgumentError")
-check value("oneHot needs one column", (raises value({ d oneHot(3) })) == "ArgumentError")
-check value("bad range", (raises value({ d slice(2, 9) })) == "ArgumentError")
-check value("header off sees text", (raises value({ Ann loadCsv(csv) })) == "ArgumentError")
-check value("missing csv", (raises value({ Ann loadCsv("/no/such/file.csv") })) == "RuntimeError")
+check("columns", pixels cols == 2 && pixels rows == 3)
+check("scale", pixels row(0) == [0, 1] && (pixels row(1)) == [0.2, 0.4])
+check("slice", (d slice(1, 3)) rows == 2 && ((d slice(2)) row(0)) == [1, 255, 0])
+check("oneHot table", ((labels oneHot(3)) toArray) == [[0, 0, 1], [1, 0, 0], [0, 1, 0]])
+check("toArray", (labels toArray) == [[2], [0], [1]])
+check("oneHot label out of range", (raises({ labels oneHot(2) })) == "ArgumentError")
+check("oneHot needs one column", (raises({ d oneHot(3) })) == "ArgumentError")
+check("bad range", (raises({ d slice(2, 9) })) == "ArgumentError")
+check("header off sees text", (raises({ Ann loadCsv(csv) })) == "ArgumentError")
+check("missing csv", (raises({ Ann loadCsv("/no/such/file.csv") })) == "RuntimeError")
 
 // a table trains a network like Arrays do
 File write(csv, "0,0,0\n0,1,1\n1,0,1\n1,1,0\n")
 xor = Ann loadCsv(csv)
 tloss = 1
-tnet = learned value({
+tnet = learned({
     n = Ann network(#{"learningRate": 0.5, "epochs": 4000, "convergence": 0.001, "quiet": true})
     n input(2)
     n dense(4, "sigmoid")
     n output(1, "sigmoid")
     n
 }, { |n| tloss = n train(xor columns(0, 2), xor column(2)); tloss < 0.01 })
-check value("trains from tables", tloss < 0.01)
-check value("table evaluate", (tnet evaluate(xor columns(0, 2), xor column(2))) < 0.05)
-check value("table width mismatch", (raises value({ net train(xor, xor column(2)) })) == "ArgumentError")
+check("trains from tables", tloss < 0.01)
+check("table evaluate", (tnet evaluate(xor columns(0, 2), xor column(2))) < 0.05)
+check("table width mismatch", (raises({ net train(xor, xor column(2)) })) == "ArgumentError")
 File delete(csv)
 File delete(dir)
 
@@ -100,15 +100,15 @@ cnet = Ann network(#{"quiet": true})
 cnet input(2)
 cnet dense(3, "relu")
 cnet output(1, "sigmoid")
-check value("controls chain", (cnet weightDecay(0.0001) l1(0) dropout(0.1) gradientClip(5) weightInit("he") lossReduction("mean") inputNoise("gaussian", 0.01) lrSchedule("cosine", 100, 0.01) lrSchedule("none")) sizes == [2, 3, 1])
-check value("layer dropout", (cnet dropout(1, 0.2)) sizes == [2, 3, 1])
-check value("bad dropout rate", (raises value({ cnet dropout(1.5) })) == "ArgumentError")
-check value("bad dropout layer", (raises value({ cnet dropout(9, 0.5) })) == "ArgumentError")
-check value("bad weightInit", (raises value({ cnet weightInit("x") })) == "ArgumentError")
-check value("bad lossReduction", (raises value({ cnet lossReduction("x") })) == "ArgumentError")
-check value("bad noise kind", (raises value({ cnet inputNoise("x") })) == "ArgumentError")
-check value("bad schedule", (raises value({ cnet lrSchedule("x") })) == "ArgumentError")
-check value("non-number setting", (raises value({ cnet weightDecay("x") })) == "ArgumentError")
+check("controls chain", (cnet weightDecay(0.0001) l1(0) dropout(0.1) gradientClip(5) weightInit("he") lossReduction("mean") inputNoise("gaussian", 0.01) lrSchedule("cosine", 100, 0.01) lrSchedule("none")) sizes == [2, 3, 1])
+check("layer dropout", (cnet dropout(1, 0.2)) sizes == [2, 3, 1])
+check("bad dropout rate", (raises({ cnet dropout(1.5) })) == "ArgumentError")
+check("bad dropout layer", (raises({ cnet dropout(9, 0.5) })) == "ArgumentError")
+check("bad weightInit", (raises({ cnet weightInit("x") })) == "ArgumentError")
+check("bad lossReduction", (raises({ cnet lossReduction("x") })) == "ArgumentError")
+check("bad noise kind", (raises({ cnet inputNoise("x") })) == "ArgumentError")
+check("bad schedule", (raises({ cnet lrSchedule("x") })) == "ArgumentError")
+check("non-number setting", (raises({ cnet weightDecay("x") })) == "ArgumentError")
 
 // validation data, early stopping and the training history
 Ann seed(3)
@@ -118,29 +118,29 @@ vnet = Ann network(#{"learningRate": 0.5, "epochs": 300, "quiet": true,
 vnet input(2)
 vnet dense(4, "sigmoid")
 vnet output(1, "sigmoid")
-check value("no history before training", vnet history size == 0 && vnet epochsTrained == 0)
+check("no history before training", vnet history size == 0 && vnet epochsTrained == 0)
 vnet train(xs, ys)
 trained = vnet epochsTrained
-check value("epochsTrained", trained > 0 && trained <= 300)
-check value("history has a row per epoch", vnet history size == trained)
+check("epochsTrained", trained > 0 && trained <= 300)
+check("history has a row per epoch", vnet history size == trained)
 row = (vnet history) at(0)
-check value("history row: loss, rate, validation loss", row size == 3 && (row at(0)) > 0 && (row at(2)) >= 0)
-check value("bestEpoch", vnet bestEpoch >= 1 && vnet bestEpoch <= trained)
+check("history row: loss, rate, validation loss", row size == 3 && (row at(0)) > 0 && (row at(2)) >= 0)
+check("bestEpoch", vnet bestEpoch >= 1 && vnet bestEpoch <= trained)
 vnet clearHistory
-check value("clearHistory", vnet history size == 0)
+check("clearHistory", vnet history size == 0)
 nv = Ann network(#{"learningRate": 0.5, "epochs": 5, "quiet": true})
 nv input(2)
 nv dense(2, "sigmoid")
 nv output(1, "sigmoid")
 nv train(xs, ys)
-check value("no validation loss is -1", (((nv history) at(0)) at(2)) == -1)
+check("no validation loss is -1", (((nv history) at(0)) at(2)) == -1)
 cdir = File tempDir
 curve = cdir + "/curve.csv"
 nv learningCurve(curve)
-check value("learningCurve writes a file", File exists(curve))
+check("learningCurve writes a file", File exists(curve))
 File delete(curve)
 File delete(cdir)
-check value("validation row mismatch", (raises value({ nv validation(xs, [[1]]) })) == "ArgumentError")
+check("validation row mismatch", (raises({ nv validation(xs, [[1]]) })) == "ArgumentError")
 
 // batch prediction, and classification from tables
 // the batched (matrix) path may round the last digit differently from one row at a time
@@ -150,7 +150,7 @@ xs each { |r|
     i = xs indexOf(r)
     ((((batch at(i)) at(0)) - ((net predict(r)) at(0))) abs > 0.0001) ifTrue { close = false }
 }
-check value("predictBatch matches predict", close)
+check("predictBatch matches predict", close)
 rows = []
 labels = []
 k = 0
@@ -162,85 +162,85 @@ k = 0
 }
 feat = AnnData fromArray(rows)
 labs = AnnData fromArray(labels)
-cls = learned value({
+cls = learned({
     n = Ann network(#{"loss": "cross_entropy", "learningRate": 0.05, "epochs": 300, "quiet": true})
     n input(3)
     n dense(6, "relu")
     n output(3, "softmax")
     n
 }, { |n| n train(feat, labs oneHot(3)); (n accuracy(feat, labs oneHot(3))) > 0.99 })
-check value("accuracy from tables", (cls accuracy(feat, labs oneHot(3))) > 0.99)
+check("accuracy from tables", (cls accuracy(feat, labs oneHot(3))) > 0.99)
 pred = cls predictBatch(feat)
-check value("predictBatch of a table is a table", pred rows == 30 && pred cols == 3)
-check value("argmax of predictions", ((pred argmax) toArray) == labels)
-check value("classifyBatch of a table", ((cls classifyBatch(feat)) toArray) == labels)
-check value("classifyBatch of Arrays", (cls classifyBatch(rows)) == (labels map { |l| l at(0) }))
+check("predictBatch of a table is a table", pred rows == 30 && pred cols == 3)
+check("argmax of predictions", ((pred argmax) toArray) == labels)
+check("classifyBatch of a table", ((cls classifyBatch(feat)) toArray) == labels)
+check("classifyBatch of Arrays", (cls classifyBatch(rows)) == (labels map { |l| l at(0) }))
 conf = cls confusionMatrix(feat, labs oneHot(3))
-check value("confusion matrix", conf == [[10, 0, 0], [0, 10, 0], [0, 0, 10]])
-check value("confusion from class numbers", (cls confusionMatrix(feat, labs)) == conf)
-check value("confusion class out of range", (raises value({ cls confusionMatrix(feat, AnnData fromArray([[7]])) })) == "ArgumentError")
-check value("batch width mismatch", (raises value({ cls predictBatch([[1, 2]]) })) == "ArgumentError")
+check("confusion matrix", conf == [[10, 0, 0], [0, 10, 0], [0, 0, 10]])
+check("confusion from class numbers", (cls confusionMatrix(feat, labs)) == conf)
+check("confusion class out of range", (raises({ cls confusionMatrix(feat, AnnData fromArray([[7]])) })) == "ArgumentError")
+check("batch width mismatch", (raises({ cls predictBatch([[1, 2]]) })) == "ArgumentError")
 
 // table extras
 t = AnnData fromArray([[1, 10], [2, 20], [3, 30], [4, 40]])
-check value("mean", t mean == [2.5, 25])
-check value("std", ((t std) at(0)) > 1.11 && ((t std) at(0)) < 1.12)
+check("mean", t mean == [2.5, 25])
+check("std", ((t std) at(0)) > 1.11 && ((t std) at(0)) < 1.12)
 z = t standardize
-check value("standardize centers", ((z mean) at(0)) < 0.0001 && ((z mean) at(0)) > -0.0001)
-check value("constant column is only shifted", ((AnnData fromArray([[5, 1], [5, 2]])) standardize) toArray == [[0, -1], [0, 1]])
+check("standardize centers", ((z mean) at(0)) < 0.0001 && ((z mean) at(0)) > -0.0001)
+check("constant column is only shifted", ((AnnData fromArray([[5, 1], [5, 2]])) standardize) toArray == [[0, -1], [0, 1]])
 parts = t split(0.75)
-check value("split", (parts at(0)) rows == 3 && (parts at(1)) rows == 1 && ((parts at(1)) row(0)) == [4, 40])
-check value("split fraction", (raises value({ t split(1) })) == "ArgumentError")
+check("split", (parts at(0)) rows == 3 && (parts at(1)) rows == 1 && ((parts at(1)) row(0)) == [4, 40])
+check("split fraction", (raises({ t split(1) })) == "ArgumentError")
 Ann seed(9)
 a = t shuffle
 Ann seed(9)
 b = t shuffle
-check value("shuffle repeats after seed", (a toArray) == (b toArray))
-check value("shuffle keeps rows whole", ((a toArray) map { |r| (r at(1)) / (r at(0)) }) == [10, 10, 10, 10])
-check value("shuffle keeps every row", (a mean) == [2.5, 25])
-check value("argmax", ((AnnData fromArray([[1, 3, 2], [9, 0, 0]])) argmax) toArray == [[1], [0]])
+check("shuffle repeats after seed", (a toArray) == (b toArray))
+check("shuffle keeps rows whole", ((a toArray) map { |r| (r at(1)) / (r at(0)) }) == [10, 10, 10, 10])
+check("shuffle keeps every row", (a mean) == [2.5, 25])
+check("argmax", ((AnnData fromArray([[1, 3, 2], [9, 0, 0]])) argmax) toArray == [[1], [0]])
 
 // what libann computes with
 info = Ann backend
-check value("backend", (info get("threads")) >= 1 && (info get("realBytes")) == 4)
-check value("threads", Ann threads == (info get("threads")))
-check value("version", (Ann version) length > 0)
+check("backend", (info get("threads")) >= 1 && (info get("realBytes")) == 4)
+check("threads", Ann threads == (info get("threads")))
+check("version", (Ann version) length > 0)
 
 // saving and exporting
 edir = File tempDir
 bin = edir + "/net.nnb"
 net saveBinary(bin)
 bnet = Ann loadBinary(bin)
-check value("binary round trip", (bnet predict([1, 0])) == (net predict([1, 0])) && bnet sizes == [2, 4, 1])
+check("binary round trip", (bnet predict([1, 0])) == (net predict([1, 0])) && bnet sizes == [2, 4, 1])
 onnx = edir + "/net.onnx.json"
 net exportOnnx(onnx)
 onet = Ann importOnnx(onnx)
-check value("onnx round trip", onet sizes == [2, 4, 1] && (((onet predict([1, 0])) at(0)) - ((net predict([1, 0])) at(0))) abs < 0.0001)
+check("onnx round trip", onet sizes == [2, 4, 1] && (((onet predict([1, 0])) at(0)) - ((net predict([1, 0])) at(0))) abs < 0.0001)
 hdr = edir + "/model.h"
 net exportC(hdr, "xornet")
-check value("exportC writes a header", (File read(hdr)) contains("xornet_predict"))
+check("exportC writes a header", (File read(hdr)) contains("xornet_predict"))
 js = edir + "/model.js"
 net exportJs(js)
-check value("exportJs writes a module", File exists(js))
+check("exportJs writes a module", File exists(js))
 pik = edir + "/net.pikchr"
 net diagram(pik)
-check value("diagram writes a file", File exists(pik))
-check value("bad C prefix", (raises value({ net exportC(hdr, "9 no") })) == "ArgumentError")
-check value("missing binary file", (raises value({ Ann loadBinary(edir + "/none.nnb") })) == "RuntimeError")
-check value("missing onnx file", (raises value({ Ann importOnnx(edir + "/none.json") })) == "RuntimeError")
-check value("saveBinary needs a path", (raises value({ net saveBinary })) == "ArgumentError")
+check("diagram writes a file", File exists(pik))
+check("bad C prefix", (raises({ net exportC(hdr, "9 no") })) == "ArgumentError")
+check("missing binary file", (raises({ Ann loadBinary(edir + "/none.nnb") })) == "RuntimeError")
+check("missing onnx file", (raises({ Ann importOnnx(edir + "/none.json") })) == "RuntimeError")
+check("saveBinary needs a path", (raises({ net saveBinary })) == "ArgumentError")
 
 // int8 quantization
 q = cls quantize(feat)
-check value("quantized accuracy", (q accuracy(feat, labs oneHot(3))) > 0.9)
-check value("quantized predict", (q predict([1, 0, 0])) size == 3)
-check value("quantized classify", (q classify([0, 1, 0])) == 1)
-check value("ioParams", q ioParams size == 4)
+check("quantized accuracy", (q accuracy(feat, labs oneHot(3))) > 0.9)
+check("quantized predict", (q predict([1, 0, 0])) size == 3)
+check("quantized classify", (q classify([0, 1, 0])) == 1)
+check("ioParams", q ioParams size == 4)
 qhdr = edir + "/model_q.h"
 q exportC(qhdr, "qnet")
-check value("quantized exportC", (File read(qhdr)) contains("qnet_predict"))
-check value("quantize calibration width", (raises value({ cls quantize([[1, 2]]) })) == "ArgumentError")
-check value("quantized wrong input width", (raises value({ q predict([1, 2]) })) == "ArgumentError")
+check("quantized exportC", (File read(qhdr)) contains("qnet_predict"))
+check("quantize calibration width", (raises({ cls quantize([[1, 2]]) })) == "ArgumentError")
+check("quantized wrong input width", (raises({ q predict([1, 2]) })) == "ArgumentError")
 File delete(bin)
 File delete(onnx)
 File delete(hdr)
@@ -255,22 +255,22 @@ lnet = Ann network(#{"learningRate": 0.5})
 lnet input(2)
 lnet dense(4, "sigmoid")
 lnet output(1, "sigmoid")
-check value("learningRate reads", lnet learningRate == 0.5)
-check value("learningRate sets and chains", ((lnet learningRate(0.25)) learningRate) == 0.25)
+check("learningRate reads", lnet learningRate == 0.5)
+check("learningRate sets and chains", ((lnet learningRate(0.25)) learningRate) == 0.25)
 lnet learningRate(0.5)
 first = lnet trainEpoch(xs, ys, 2)
-check value("trainEpoch returns the mean loss", first > 0)
+check("trainEpoch returns the mean loss", first > 0)
 lnet trainBegin
 step1 = lnet trainStep(xs, ys)
 i = 0
 { i < 400 } whileTrue { lnet trainStep(xs, ys); i = i + 1 }
 step2 = lnet trainStep(xs, ys)
 lnet trainEnd
-check value("trainStep learns", step2 < step1)
-check value("trainStep takes tables", (lnet trainEpoch(AnnData fromArray(xs), AnnData fromArray(ys), 4, false)) > 0)
-check value("trainEpoch width mismatch", (raises value({ lnet trainEpoch([[1]], [[1]]) })) == "ArgumentError")
-check value("trainEpoch batch size", (raises value({ lnet trainEpoch(xs, ys, 0) })) == "ArgumentError")
-check value("trainStep row mismatch", (raises value({ lnet trainStep(xs, [[1]]) })) == "ArgumentError")
+check("trainStep learns", step2 < step1)
+check("trainStep takes tables", (lnet trainEpoch(AnnData fromArray(xs), AnnData fromArray(ys), 4, false)) > 0)
+check("trainEpoch width mismatch", (raises({ lnet trainEpoch([[1]], [[1]]) })) == "ArgumentError")
+check("trainEpoch batch size", (raises({ lnet trainEpoch(xs, ys, 0) })) == "ArgumentError")
+check("trainStep row mismatch", (raises({ lnet trainStep(xs, [[1]]) })) == "ArgumentError")
 
 Ann seed(2)
 fnet = Ann network(#{"learningRate": 0.5})
@@ -280,39 +280,39 @@ fnet output(1, "sigmoid")
 seen = []
 hist = fnet fit(xs, ys, #{"epochs": 4, "batchSize": 2, "lrSchedule": ["exponential", 0.5],
                          "onEpoch": { |e| seen push(e get("epoch")) }})
-check value("fit history", hist size == 4 && seen == [1, 2, 3, 4])
-check value("fit entry", ((hist at(0)) get("loss")) > 0 && ((hist at(0)) get("valLoss")) == -1)
-check value("fit applies the schedule", ((hist at(0)) get("lr")) == 0.5 && ((hist at(2)) get("lr")) == 0.125)
-check value("fit restores the learning rate", fnet learningRate == 0.5)
+check("fit history", hist size == 4 && seen == [1, 2, 3, 4])
+check("fit entry", ((hist at(0)) get("loss")) > 0 && ((hist at(0)) get("valLoss")) == -1)
+check("fit applies the schedule", ((hist at(0)) get("lr")) == 0.5 && ((hist at(2)) get("lr")) == 0.125)
+check("fit restores the learning rate", fnet learningRate == 0.5)
 stopped = fnet fit(xs, ys, #{"epochs": 50, "onEpoch": { |e| (e get("epoch")) < 3 }})
-check value("onEpoch false stops", stopped size == 3)
+check("onEpoch false stops", stopped size == 3)
 flat = fnet fit(xs, ys, #{"epochs": 100, "patience": 2, "minDelta": 1000})
-check value("patience stops when nothing improves enough", flat size == 3)
+check("patience stops when nothing improves enough", flat size == 3)
 valid = fnet fit(xs, ys, #{"epochs": 2, "validation": [xs, ys]})
-check value("fit measures validation loss", ((valid at(0)) get("valLoss")) >= 0)
-check value("fit without options", (fnet fit(xs, ys)) size == 10)
-check value("fit zero epochs", (fnet fit(xs, ys, #{"epochs": 0})) size == 0)
+check("fit measures validation loss", ((valid at(0)) get("valLoss")) >= 0)
+check("fit without options", (fnet fit(xs, ys)) size == 10)
+check("fit zero epochs", (fnet fit(xs, ys, #{"epochs": 0})) size == 0)
 
 // fit, layers and summary keep their variables to themselves
 stale = "mine"; entry = "mine"; running = "mine"; total = "mine"; info = "mine"
 fnet fit(xs, ys, #{"epochs": 2, "patience": 1})
 fnet summary
-check value("fit and summary leave the caller's variables alone",
+check("fit and summary leave the caller's variables alone",
             [stale, entry, running, total, info] == ["mine", "mine", "mine", "mine", "mine"])
 
 // snapshot / restore: the weights come back exactly
 before = (fnet predict([0, 1])) at(0)
 fnet snapshot
 fnet fit(xs, ys, #{"epochs": 5})
-check value("training moved the weights", ((fnet predict([0, 1])) at(0)) != before)
-check value("restore returns the network", (fnet restore) == fnet)
-check value("restore puts the snapshot back", ((fnet predict([0, 1])) at(0)) == before)
+check("training moved the weights", ((fnet predict([0, 1])) at(0)) != before)
+check("restore returns the network", (fnet restore) == fnet)
+check("restore puts the snapshot back", ((fnet predict([0, 1])) at(0)) == before)
 fnet restore
-check value("restore works again", ((fnet predict([0, 1])) at(0)) == before)
+check("restore works again", ((fnet predict([0, 1])) at(0)) == before)
 bare = Ann network(#{})
 bare input(2)
 bare output(1, "sigmoid")
-check value("restore without a snapshot", (raises value({ bare restore })) == "RuntimeError")
+check("restore without a snapshot", (raises({ bare restore })) == "RuntimeError")
 
 // restoreBest: validation targets that are the opposite of the training targets get worse
 // as the network learns, so the best epoch is an early one, not the last
@@ -320,28 +320,28 @@ near = { |a, b| (a - b) abs < 0.00001 }
 lowestVal = { |h| (h map { |e| e get("valLoss") }) min }
 wrong = ys map { |r| [1 - (r at(0))] }
 kept = fnet fit(xs, wrong, #{"epochs": 6, "validation": [xs, ys], "restoreBest": true})
-check value("restoreBest ends on the lowest validation loss", near value(fnet evaluate(xs, ys), lowestVal value(kept)))
-check value("the best epoch wasn't the last", ((kept last) get("valLoss")) > (lowestVal value(kept)))
+check("restoreBest ends on the lowest validation loss", near(fnet evaluate(xs, ys), lowestVal(kept)))
+check("the best epoch wasn't the last", ((kept last) get("valLoss")) > (lowestVal(kept)))
 last = fnet fit(xs, wrong, #{"epochs": 6, "validation": [xs, ys]})
-check value("without it fit ends on the last epoch", near value(fnet evaluate(xs, ys), (last last) get("valLoss")))
+check("without it fit ends on the last epoch", near(fnet evaluate(xs, ys), (last last) get("valLoss")))
 early = fnet fit(xs, wrong, #{"epochs": 50, "validation": [xs, ys], "patience": 2})
-check value("patience restores the best by default", early size < 50 && (near value(fnet evaluate(xs, ys), lowestVal value(early))))
+check("patience restores the best by default", early size < 50 && (near(fnet evaluate(xs, ys), lowestVal(early))))
 off = fnet fit(xs, wrong, #{"epochs": 50, "validation": [xs, ys], "patience": 2, "restoreBest": false})
-check value("restoreBest false keeps the last epoch", near value(fnet evaluate(xs, ys), (off last) get("valLoss")))
+check("restoreBest false keeps the last epoch", near(fnet evaluate(xs, ys), (off last) get("valLoss")))
 plain = fnet fit(xs, ys, #{"epochs": 6, "restoreBest": true})
-check value("restoreBest follows the training loss without validation", (plain size) == 6)
+check("restoreBest follows the training loss without validation", (plain size) == 6)
 xorOk = { |n| ((n predict([0, 1])) at(0)) > 0.8 && ((n predict([1, 1])) at(0)) < 0.2 }
-xnet = learned value({
+xnet = learned({
     n = Ann network(#{"learningRate": 0.5})
     n input(2)
     n dense(4, "sigmoid")
     n output(1, "sigmoid")
     n
-}, { |n| n fit(xs, ys, #{"epochs": 3000, "batchSize": 4}); xorOk value(n) })
-check value("fit learns xor", xorOk value(xnet))
-check value("scheduledRate step", (Ann scheduledRate(["step", 2, 0.5], 1, 3)) == 0.5)
-check value("scheduledRate cosine ends at the minimum", (Ann scheduledRate(["cosine", 10, 0.01], 1, 10)) == 0.01)
-check value("scheduledRate none", (Ann scheduledRate(["none"], 0.3, 7)) == 0.3)
+}, { |n| n fit(xs, ys, #{"epochs": 3000, "batchSize": 4}); xorOk(n) })
+check("fit learns xor", xorOk(xnet))
+check("scheduledRate step", (Ann scheduledRate(["step", 2, 0.5], 1, 3)) == 0.5)
+check("scheduledRate cosine ends at the minimum", (Ann scheduledRate(["cosine", 10, 0.01], 1, 10)) == 0.01)
+check("scheduledRate none", (Ann scheduledRate(["none"], 0.3, 7)) == 0.3)
 
 // image layers: shapes, parameters and the summary
 img = Ann network(#{"loss": "cross_entropy", "quiet": true})
@@ -353,31 +353,31 @@ img flatten
 img dense(5, "relu")
 img output(2, "softmax")
 ls = img layers
-check value("layer kinds", (ls map { |l| l get("kind") }) == ["input", "conv2d", "maxpool2d", "conv2d", "flatten", "dense", "dense"])
-check value("shapes", (ls map { |l| l get("shape") }) == [[1, 8, 8], [4, 6, 6], [4, 3, 3], [6, 3, 3], [54, 1, 1], [5, 1, 1], [2, 1, 1]])
-check value("parameter counts", (ls map { |l| l get("params") }) == [0, 40, 0, 78, 0, 275, 12])
-check value("activations", ((ls at(1)) get("activation")) == "relu" && ((ls at(6)) get("activation")) == "softmax")
-check value("summary", ((img summary) contains("conv2d")) && ((img summary) contains("total parameters: 405")))
-check value("sizes of an image network", img sizes == [64, 144, 36, 54, 54, 5, 2])
+check("layer kinds", (ls map { |l| l get("kind") }) == ["input", "conv2d", "maxpool2d", "conv2d", "flatten", "dense", "dense"])
+check("shapes", (ls map { |l| l get("shape") }) == [[1, 8, 8], [4, 6, 6], [4, 3, 3], [6, 3, 3], [54, 1, 1], [5, 1, 1], [2, 1, 1]])
+check("parameter counts", (ls map { |l| l get("params") }) == [0, 40, 0, 78, 0, 275, 12])
+check("activations", ((ls at(1)) get("activation")) == "relu" && ((ls at(6)) get("activation")) == "softmax")
+check("summary", ((img summary) contains("conv2d")) && ((img summary) contains("total parameters: 405")))
+check("sizes of an image network", img sizes == [64, 144, 36, 54, 54, 5, 2])
 same = Ann network
 same input(2, 9, 9)
 same conv2d(3, 3, "none", 2, "same")
-check value("same padding and stride", (same layers at(1)) get("shape") == [3, 5, 5])
+check("same padding and stride", (same layers at(1)) get("shape") == [3, 5, 5])
 grouped = Ann network
 grouped input(4, 6, 6)
 grouped conv2d(8, 3, "none", 1, 0, 2)
 grouped depthwiseConv2d(2, 3)
-check value("grouped and depthwise", (grouped layers) map { |l| l get("shape") } == [[4, 6, 6], [8, 4, 4], [16, 2, 2]])
-check value("grouped parameters", ((grouped layers at(1)) get("params")) == 8 * 2 * 9 + 8)
+check("grouped and depthwise", (grouped layers) map { |l| l get("shape") } == [[4, 6, 6], [8, 4, 4], [16, 2, 2]])
+check("grouped parameters", ((grouped layers at(1)) get("params")) == 8 * 2 * 9 + 8)
 other = Ann network
 other input(1, 4, 4)
 other upsample2d(2)
 other reshape(4, 4, 4)
 other batchNorm("relu")
 other globalAvgPool
-check value("upsample, reshape, batchNorm, pooling", (other layers) map { |l| l get("shape") } == [[1, 4, 4], [1, 8, 8], [4, 4, 4], [4, 4, 4], [4, 1, 1]])
-check value("batchNorm has parameters", ((other layers at(3)) get("params")) > 0)
-check value("globalMaxPool", ((Ann network input(3, 5, 5) globalMaxPool) layers at(1)) get("shape") == [3, 1, 1])
+check("upsample, reshape, batchNorm, pooling", (other layers) map { |l| l get("shape") } == [[1, 4, 4], [1, 8, 8], [4, 4, 4], [4, 4, 4], [4, 1, 1]])
+check("batchNorm has parameters", ((other layers at(3)) get("params")) > 0)
+check("globalMaxPool", ((Ann network input(3, 5, 5) globalMaxPool) layers at(1)) get("shape") == [3, 1, 1])
 
 // a small conv net learns bars: horizontal against vertical
 bars = []
@@ -403,7 +403,7 @@ k = 0
 }
 bx = AnnData fromArray(bars)
 by = (AnnData fromArray(barLabels)) oneHot(2)
-cnn = learned value({
+cnn = learned({
     n = Ann network(#{"loss": "cross_entropy", "learningRate": 0.01, "epochs": 200, "batchSize": 16, "quiet": true})
     n input(1, 6, 6)
     n conv2d(8, 3, "relu", 1, "same")
@@ -412,19 +412,19 @@ cnn = learned value({
     n output(2, "softmax")
     n
 }, { |n| n train(bx, by); (n accuracy(bx, by)) > 0.95 })
-check value("a conv net learns", (cnn accuracy(bx, by)) > 0.95)
-check value("fit works on a conv net", (cnn fit(bx, by, #{"epochs": 2})) size == 2)
+check("a conv net learns", (cnn accuracy(bx, by)) > 0.95)
+check("fit works on a conv net", (cnn fit(bx, by, #{"epochs": 2})) size == 2)
 
 // a conv net survives saving, quantizing and export
 cdir = File tempDir
 cbin = cdir + "/cnn.nnb"
 cnn saveBinary(cbin)
 cback = Ann loadBinary(cbin)
-check value("conv net binary round trip", (cback layers) == (cnn layers) && (cback predict(bars at(0))) == (cnn predict(bars at(0))))
+check("conv net binary round trip", (cback layers) == (cnn layers) && (cback predict(bars at(0))) == (cnn predict(bars at(0))))
 cq = cnn quantize(bx)
-check value("quantized conv net", (cq accuracy(bx, by)) > 0.9)
+check("quantized conv net", (cq accuracy(bx, by)) > 0.9)
 cnn exportC(cdir + "/cnn.h", "cnn")
-check value("conv net C header", File exists(cdir + "/cnn.h"))
+check("conv net C header", File exists(cdir + "/cnn.h"))
 File delete(cbin)
 File delete(cdir + "/cnn.h")
 File delete(cdir)
@@ -447,7 +447,7 @@ k = 0
 }
 sx = AnnData fromArray(seqs)
 sy = (AnnData fromArray(seqLabels)) oneHot(2)
-txt = learned value({
+txt = learned({
     n = Ann network(#{"loss": "cross_entropy", "learningRate": 0.02, "epochs": 150, "batchSize": 8, "quiet": true})
     n input(6)
     n embedding(5, 4, 0, true)
@@ -456,40 +456,40 @@ txt = learned value({
     n output(2, "softmax")
     n
 }, { |n| n train(sx, sy); (n accuracy(sx, sy)) > 0.9 })
-check value("embedding shape", (txt layers at(1)) get("shape") == [4, 1, 6])
-check value("conv1d shape", (txt layers at(2)) get("shape") == [6, 1, 5])
-check value("a text-style net learns", (txt accuracy(sx, sy)) > 0.9)
+check("embedding shape", (txt layers at(1)) get("shape") == [4, 1, 6])
+check("conv1d shape", (txt layers at(2)) get("shape") == [6, 1, 5])
+check("a text-style net learns", (txt accuracy(sx, sy)) > 0.9)
 seqnet = Ann network
 seqnet input(3, 1, 10)
 seqnet conv1d(5, 3, "relu", 1, "same")
 seqnet maxPool1d(2)
-check value("conv1d and maxPool1d on a sequence", (seqnet layers) map { |l| l get("shape") } == [[3, 1, 10], [5, 1, 10], [5, 1, 5]])
+check("conv1d and maxPool1d on a sequence", (seqnet layers) map { |l| l get("shape") } == [[3, 1, 10], [5, 1, 10], [5, 1, 5]])
 
 // mistakes building layers are ArgumentErrors
-check value("conv2d with no input", (raises value({ Ann network conv2d(4, 3) })) == "ArgumentError")
-check value("kernel too big", (raises value({ Ann network input(1, 4, 4) conv2d(2, 9) })) == "ArgumentError")
-check value("bad kernel", (raises value({ Ann network input(1, 4, 4) conv2d(2, [3]) })) == "ArgumentError")
-check value("bad padding", (raises value({ Ann network input(1, 4, 4) conv2d(2, 3, "relu", 1, "wide") })) == "ArgumentError")
-check value("bad activation", (raises value({ Ann network input(1, 4, 4) conv2d(2, 3, "nope") })) == "ArgumentError")
-check value("no filters", (raises value({ Ann network input(1, 4, 4) conv2d(0, 3) })) == "ArgumentError")
-check value("reshape size mismatch", (raises value({ Ann network input(8) reshape(2, 2, 3) })) == "ArgumentError")
-check value("image input after layers", (raises value({ Ann network input(4) input(1, 2, 2) })) == "ArgumentError")
-check value("pool too big", (raises value({ Ann network input(1, 2, 2) maxPool2d(3) })) == "ArgumentError")
+check("conv2d with no input", (raises({ Ann network conv2d(4, 3) })) == "ArgumentError")
+check("kernel too big", (raises({ Ann network input(1, 4, 4) conv2d(2, 9) })) == "ArgumentError")
+check("bad kernel", (raises({ Ann network input(1, 4, 4) conv2d(2, [3]) })) == "ArgumentError")
+check("bad padding", (raises({ Ann network input(1, 4, 4) conv2d(2, 3, "relu", 1, "wide") })) == "ArgumentError")
+check("bad activation", (raises({ Ann network input(1, 4, 4) conv2d(2, 3, "nope") })) == "ArgumentError")
+check("no filters", (raises({ Ann network input(1, 4, 4) conv2d(0, 3) })) == "ArgumentError")
+check("reshape size mismatch", (raises({ Ann network input(8) reshape(2, 2, 3) })) == "ArgumentError")
+check("image input after layers", (raises({ Ann network input(4) input(1, 2, 2) })) == "ArgumentError")
+check("pool too big", (raises({ Ann network input(1, 2, 2) maxPool2d(3) })) == "ArgumentError")
 
 // a loss that doesn't fit the output layer is an error, not a quiet 0
 bad = Ann network(#{"loss": "cross_entropy", "quiet": true})
 bad input(2)
 bad output(2, "relu")
-check value("cross_entropy needs softmax or sigmoid", (raises value({ bad train([[0, 0]], [[1, 0]]) })) == "ArgumentError")
+check("cross_entropy needs softmax or sigmoid", (raises({ bad train([[0, 0]], [[1, 0]]) })) == "ArgumentError")
 
 // errors are Clay errors, not crashes
-check value("wrong input width", (raises value({ net predict([1, 2, 3]) })) == "ArgumentError")
-check value("ragged rows", (raises value({ net train([[1, 2], [3]], [[1], [0]]) })) == "ArgumentError")
-check value("row count mismatch", (raises value({ net train(xs, [[1]]) })) == "ArgumentError")
-check value("bad activation", (raises value({ Ann network input(2) dense(3, "nope") })) == "ArgumentError")
-check value("bad optimizer", (raises value({ Ann network(#{"optimizer": "x"}) })) == "ArgumentError")
-check value("non-number data", (raises value({ net predict([1, "x"]) })) == "TypeError")
-check value("missing file", (raises value({ Ann load("/no/such/file.nna") })) == "RuntimeError")
+check("wrong input width", (raises({ net predict([1, 2, 3]) })) == "ArgumentError")
+check("ragged rows", (raises({ net train([[1, 2], [3]], [[1], [0]]) })) == "ArgumentError")
+check("row count mismatch", (raises({ net train(xs, [[1]]) })) == "ArgumentError")
+check("bad activation", (raises({ Ann network input(2) dense(3, "nope") })) == "ArgumentError")
+check("bad optimizer", (raises({ Ann network(#{"optimizer": "x"}) })) == "ArgumentError")
+check("non-number data", (raises({ net predict([1, "x"]) })) == "TypeError")
+check("missing file", (raises({ Ann load("/no/such/file.nna") })) == "RuntimeError")
 
 (failures > 0) ifTrue { (failures toString + " failed") println; System exit(1) }
 "ann: all tests passed" println

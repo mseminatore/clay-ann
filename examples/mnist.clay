@@ -86,9 +86,9 @@ history = net fit(xTrain, yTrain, #{
     "patience": 2,
     "onEpoch": { |e|
         epoch = e get("epoch")
-        loss = round3 value(e get("loss"))
-        valLoss = round3 value(e get("valLoss"))
-        valAcc = percent value(net accuracy(xValid, yValid))
+        loss = round3(e get("loss"))
+        valLoss = round3(e get("valLoss"))
+        valAcc = percent(net accuracy(xValid, yValid))
         ("epoch ${epoch}: loss ${loss}, validation loss ${valLoss}, accuracy ${valAcc}") println
     }
 })
@@ -98,7 +98,7 @@ seconds = (System clock - started) / 1000.0
 
 // --- results ---------------------------------------------------------------------------------
 
-testAcc = percent value(net accuracy(xTest, yTest))
+testAcc = percent(net accuracy(xTest, yTest))
 ("test accuracy: ${testAcc}") println
 
 // confusion matrix: a row per actual class, a column per predicted class
@@ -163,6 +163,6 @@ i = 0
 
 (savePath != nil) ifTrue {
     net saveBinary(savePath)
-    again = percent value((Ann loadBinary(savePath)) accuracy(xTest, yTest))
+    again = percent((Ann loadBinary(savePath)) accuracy(xTest, yTest))
     ("\nsaved to ${savePath} (${File size(savePath)} bytes); reloaded, test accuracy is ${again}") println
 }

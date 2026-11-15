@@ -21,7 +21,7 @@ pixels = { |rows|
     out
 }
 
-inputs = glyphs map { |g| pixels value(g) }
+inputs = glyphs map { |g| pixels(g) }
 labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 targets = Ann oneHot(labels, 10)
 

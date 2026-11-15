@@ -216,7 +216,7 @@ Ann = Object clone {
                 net snapshot
             }
             (onEpoch != nil) ifTrue {
-                ((onEpoch value(entry)) == false) ifTrue { running = false }
+                ((onEpoch(entry)) == false) ifTrue { running = false }
             }
             (patience > 0) ifTrue {
                 ((best == nil) || (seen < best - minDelta)) ifTrue { best = seen; stale = 0 } ifFalse { stale = stale + 1 }
@@ -243,16 +243,16 @@ Ann = Object clone {
             { t length < width } whileTrue { t = t + " " }
             t
         }
-        out = (cell value("#", 4)) + (cell value("layer", 18)) + (cell value("output shape", 16)) +
-              (cell value("activation", 12)) + "params\n"
+        out = (cell("#", 4)) + (cell("layer", 18)) + (cell("output shape", 16)) +
+              (cell("activation", 12)) + "params\n"
         total = 0
         i = 0
         (net layers) each { |l|
             sh = l get("shape")
             shape = (sh at(0)) toString + "x" + (sh at(1)) toString + "x" + (sh at(2)) toString
             ((sh at(1)) == 1 && (sh at(2)) == 1) ifTrue { shape = (sh at(0)) toString }
-            out = out + (cell value(i, 4)) + (cell value(l get("kind"), 18)) + (cell value(shape, 16)) +
-                  (cell value(l get("activation"), 12)) + (l get("params")) toString + "\n"
+            out = out + (cell(i, 4)) + (cell(l get("kind"), 18)) + (cell(shape, 16)) +
+                  (cell(l get("activation"), 12)) + (l get("params")) toString + "\n"
             total = total + (l get("params"))
             i = i + 1
         }
