@@ -44,7 +44,9 @@
 //     classifyBatch(inputs)      -> the class of every row
 //     confusionMatrix(inputs, targets) -> counts, matrix[actual][predicted]
 //     epochsTrained, bestEpoch, history (rows of [loss, rate, validation loss]),
-//     clearHistory, learningCurve(path)
+//     clearHistory, learningCurve(path) (after train or fit)
+//     recordEpoch(loss, rate, validationLoss), trainingRun(epochs, bestEpoch): report epochs
+//       trained with trainEpoch or trainStep to history, epochsTrained and bestEpoch
 //     fit(inputs, targets, options) -> train epoch by epoch with an onEpoch block (see below)
 //     trainEpoch(inputs, targets, batchSize, shuffle), trainBegin, trainStep(inputs, targets),
 //     trainEnd, learningRate (reads it)
@@ -200,6 +202,7 @@ Ann = Object clone {
         base = net learningRate
         history = []
         best = nil
+        bestAt = 0
         stale = 0
         epoch = 1
         running = epochs > 0
@@ -209,6 +212,7 @@ Ann = Object clone {
             val = (valid == nil) ifTrue { -1 } ifFalse { net evaluate(valid at(0), valid at(1)) }
             entry = #{"epoch": epoch, "loss": loss, "valLoss": val, "lr": net learningRate}
             history push(entry)
+            net recordEpoch(loss, net learningRate, val)
             seen = (valid == nil) ifTrue { loss } ifFalse { val }
             (keepBest && ((lowest == nil) || (seen < lowest))) ifTrue {
                 lowest = seen
@@ -219,13 +223,16 @@ Ann = Object clone {
                 ((onEpoch(entry)) == false) ifTrue { running = false }
             }
             (patience > 0) ifTrue {
-                ((best == nil) || (seen < best - minDelta)) ifTrue { best = seen; stale = 0 } ifFalse { stale = stale + 1 }
+                ((best == nil) || (seen < best - minDelta)) ifTrue { best = seen; bestAt = epoch; stale = 0 } ifFalse { stale = stale + 1 }
                 (stale >= patience) ifTrue { running = false }
             }
             epoch = epoch + 1
             (epoch > epochs) ifTrue { running = false }
         }
         (keepBest && lowestAt > 0 && lowestAt < history size) ifTrue { net restore }
+        // epochsTrained, bestEpoch, history and learningCurve report fit's run as they do train's
+        kept = keepBest ifTrue { lowestAt } ifFalse { bestAt }
+        net trainingRun(history size, kept)
         net learningRate(base)
         history
     }
@@ -276,7 +283,9 @@ Ann = Object clone {
 //   onEpoch: a block called after each epoch with a Dict of epoch, loss, valLoss (-1 without
 //     validation data) and lr; it stops the training by returning false
 // Returns the history: an Array with one such Dict per epoch. The learning rate is back to
-// what it was when fit returns.
+// what it was when fit returns. As after train, net history and learningCurve gain a row
+// per epoch, epochsTrained counts the run and bestEpoch is the epoch whose weights were kept
+// (with restoreBest) or the best one patience saw (else 0).
 AnnNet setMethod("fit", { |x, y, options| Ann _fit(self, x, y, options) })
 
 // net layers: one Dict per layer, input first: kind ("input", "dense", "conv2d", "maxpool2d",

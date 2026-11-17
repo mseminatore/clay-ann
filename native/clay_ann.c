@@ -795,6 +795,32 @@ static ClayPluginValue net_best_epoch(ClayPluginObject self, int argc, ClayPlugi
     return api->make_int((intptr_t)ann_get_best_epoch(net_of(self, "bestEpoch")));
 }
 
+/* recordEpoch(loss, learningRate, validationLoss = -1): add an epoch trained outside train
+ * (with trainEpoch or trainStep) to the history, so history and learningCurve include it */
+static ClayPluginValue net_record_epoch(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "recordEpoch");
+    if (argc < 2) { api->raise("recordEpoch needs a loss and a learning rate", "ArgumentError"); return 0; }
+    real loss = real_arg("recordEpoch", argc, argv, 0);
+    real rate = real_arg("recordEpoch", argc, argv, 1);
+    real val = argc > 2 && !api->is_nil(argv[2]) ? real_arg("recordEpoch", argc, argv, 2) : -1;
+    int rc = ann_record_epoch(n, loss, rate, val);
+    if (rc == ERR_INVALID) { api->raise("recordEpoch: the history is full (clearHistory first)", "RuntimeError"); return 0; }
+    if (rc != ERR_OK) { api->raise("ann: out of memory", "RuntimeError"); return 0; }
+    return (ClayPluginValue)self;
+}
+
+/* trainingRun(epochs, bestEpoch = 0): set what epochsTrained and bestEpoch report, for a run
+ * made outside train */
+static ClayPluginValue net_training_run(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "trainingRun");
+    int epochs, best;
+    if (!int_arg("trainingRun", argc, argv, 0, 0, 0, 0, &epochs) ||
+        !int_arg("trainingRun", argc, argv, 1, 1, 0, 0, &best)) return 0;
+    if (best > epochs) { api->raise("trainingRun: bestEpoch can't be after the last epoch", "ArgumentError"); return 0; }
+    ann_set_training_run(n, (unsigned)epochs, (unsigned)best);
+    return (ClayPluginValue)self;
+}
+
 /* Every parameter of every layer, in order: counted (buf NULL), copied out to buf, or
  * (restore) copied back from it. Returns the number of values, or -1 if libann refuses. */
 static long params_copy(PNetwork n, real *buf, int restore) {
@@ -1685,6 +1711,7 @@ static ClayPluginMethod methods[] = {
     { "inputNoise", net_set_noise },         { "lrSchedule", net_set_schedule },
     { "validation", net_set_validation },    { "earlyStopping", net_set_early },
     { "epochsTrained", net_epochs_trained }, { "bestEpoch", net_best_epoch },
+    { "recordEpoch", net_record_epoch },     { "trainingRun", net_training_run },
     { "snapshot", net_snapshot },            { "restore", net_restore },
     { "history", net_history },              { "clearHistory", net_clear_history },
     { "learningCurve", net_learning_curve },

@@ -119,9 +119,10 @@ they chain (`net dropout(0.2) weightDecay(0.0001)`):
 | `validation` | `[inputs, targets]`, held out: its loss is reported each epoch |
 | `earlyStopping` | patience in epochs, or `[patience, minDelta, restoreBest]`: stop when the loss (the validation loss, if there is one) stops improving |
 
-After training: `net epochsTrained`, `net bestEpoch` (with early stopping),
-`net history` (a row `[loss, learningRate, validationLoss]` per epoch, with -1 when there was no
-validation data), `net clearHistory`, and `net learningCurve(path)` to write the history as a CSV file.
+After training with `train` or `fit`: `net epochsTrained` (in the last run), `net bestEpoch` (with
+early stopping), `net history` (a row `[loss, learningRate, validationLoss]` per epoch, with -1 when
+there was no validation data; it accumulates across runs), `net clearHistory`, and
+`net learningCurve(path)` to write the history as a CSV file.
 
 ```clay
 net = Ann network(#{"loss": "cross_entropy", "epochs": 50, "dropout": 0.2,
@@ -211,7 +212,10 @@ history = net fit(x, y, #{
 | `restoreBest` | finish with the weights of the epoch whose loss (the validation loss, if there is one) was lowest, not the last epoch's. Default: `true` with `patience`, as for `earlyStopping`; otherwise `false` |
 | `onEpoch` | a block called after each epoch with a Dict of `epoch`, `loss`, `valLoss` (-1 without validation data) and `lr`; returning `false` stops the training |
 
-`fit` returns the history, one such Dict per epoch, and puts the learning rate back as it was.
+`fit` returns the history, one such Dict per epoch, and puts the learning rate back as it was. Like
+`train`, it also adds a row per epoch to `net history` (and so to `net learningCurve`), and sets
+`net epochsTrained` and `net bestEpoch`: the epoch whose weights `restoreBest` kept, else the best
+one `patience` saw, else 0.
 
 The pieces are available directly, for custom batching, streaming data or several networks in
 step:
@@ -223,6 +227,7 @@ step:
 | `learningRate`, `learningRate(r)` | read or set the learning rate |
 | `snapshot`, `restore` | `snapshot` remembers the weights as they are now (one snapshot per network; a new one replaces it) and `restore` puts them back. `fit`'s `restoreBest` uses them |
 | `Ann scheduledRate(spec, base, epoch)` | the rate a schedule gives an epoch |
+| `recordEpoch(loss, learningRate, validationLoss)`, `trainingRun(epochs, bestEpoch)` | report epochs trained with these methods, so `history`, `learningCurve`, `epochsTrained` and `bestEpoch` include them (`validationLoss` defaults to -1, `bestEpoch` to 0). `fit` calls them for you |
 
 Optimizer state (such as Adam's moments) carries over between steps and epochs. These methods use
 the CPU; dropout and input noise apply while a session or epoch runs.
