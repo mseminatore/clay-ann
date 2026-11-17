@@ -281,6 +281,12 @@ seen = []
 hist = fnet fit(xs, ys, #{"epochs": 4, "batchSize": 2, "lrSchedule": ["exponential", 0.5],
                          "onEpoch": { |e| seen push(e get("epoch")) }})
 check("fit history", hist size == 4 && seen == [1, 2, 3, 4])
+check("fit fills net history", fnet history size == 4 && fnet epochsTrained == 4 && fnet bestEpoch == 0)
+check("net history matches fit's", (((fnet history) at(3)) at(0)) == ((hist at(3)) get("loss")) &&
+      (((fnet history) at(3)) at(1)) == ((hist at(3)) get("lr")) && (((fnet history) at(3)) at(2)) == -1)
+fcurve = File tempDir + "/fit_curve.csv"
+fnet learningCurve(fcurve)
+check("learningCurve after fit", File exists(fcurve))
 check("fit entry", ((hist at(0)) get("loss")) > 0 && ((hist at(0)) get("valLoss")) == -1)
 check("fit applies the schedule", ((hist at(0)) get("lr")) == 0.5 && ((hist at(2)) get("lr")) == 0.125)
 check("fit restores the learning rate", fnet learningRate == 0.5)
@@ -290,6 +296,22 @@ flat = fnet fit(xs, ys, #{"epochs": 100, "patience": 2, "minDelta": 1000})
 check("patience stops when nothing improves enough", flat size == 3)
 valid = fnet fit(xs, ys, #{"epochs": 2, "validation": [xs, ys]})
 check("fit measures validation loss", ((valid at(0)) get("valLoss")) >= 0)
+check("net history keeps fit's validation loss", (((fnet history) at(fnet history size - 1)) at(2)) == ((valid at(1)) get("valLoss")))
+check("epochsTrained covers the last fit", fnet epochsTrained == 2)
+bnet = Ann network(#{"learningRate": 0.5})
+bnet input(2)
+bnet dense(4, "sigmoid")
+bnet output(1, "sigmoid")
+bh = bnet fit(xs, ys, #{"epochs": 20, "patience": 3})
+check("fit sets bestEpoch with patience", bnet bestEpoch >= 1 && bnet bestEpoch <= bh size && bnet epochsTrained == bh size)
+bnet clearHistory
+bnet recordEpoch(0.5, 0.1)
+bnet recordEpoch(0.4, 0.1, 0.3)
+check("recordEpoch", bnet history size == 2 && (((bnet history) at(0)) at(2)) == -1 &&
+      ((((bnet history) at(1)) at(2)) - 0.3) abs < 0.000001)
+bnet trainingRun(2, 1)
+check("trainingRun", bnet epochsTrained == 2 && bnet bestEpoch == 1)
+check("trainingRun bestEpoch past the run", (raises({ bnet trainingRun(2, 3) })) == "ArgumentError")
 check("fit without options", (fnet fit(xs, ys)) size == 10)
 check("fit zero epochs", (fnet fit(xs, ys, #{"epochs": 0})) size == 0)
 
