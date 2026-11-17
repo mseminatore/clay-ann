@@ -292,8 +292,9 @@ them; `Ann version` is libann's version.
 ## Development
 
 libann is a git submodule (`native/libann`); clone with `--recurse-submodules`. The plugin is
-`native/clay_ann.c`, and the Clay API is `src/main.clay`. To run the tests from a project with
-this brick installed: `clay tests/test_ann.clay`.
+`native/clay_ann.c`, and the Clay API is `src/main.clay`. Run the tests from the brick's
+directory with `clay tests/test_ann.clay`; GitHub Actions runs them on Linux, macOS and Windows
+(`.github/workflows/test.yml`).
 
 ## License
 

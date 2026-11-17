@@ -1,5 +1,6 @@
-// tests for the ann brick (run from a project with this brick installed:
-// clay tests/test_ann.clay, or see README.md)
+// tests for the ann brick. Run them from the brick's directory:
+//   clay tests/test_ann.clay
+// (a brick can import itself by name from its own directory)
 import("ann")
 
 failures = 0
