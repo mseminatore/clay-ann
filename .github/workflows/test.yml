@@ -1,0 +1,64 @@
+name: Test
+
+# Runs the brick's tests with Clay on Linux, macOS and Windows. This is for GitHub;
+# on another host, delete this folder (or make bricks with `clay bricks new --no-ci`).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # The Clay to test with: a branch, or a release tag such as v0.2.0
+  CLAY_REF: v0.3.5
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive  # native/libann
+
+      - name: Get Clay
+        uses: actions/checkout@v4
+        with:
+          repository: mseminatore/clay
+          ref: ${{ env.CLAY_REF }}
+          submodules: recursive
+          path: clay
+
+      - name: Build Clay
+        run: |
+          cmake -S clay -B clay/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_DISABLE_FIND_PACKAGE_SDL2=ON
+          cmake --build clay/build --config Release --target clay_compiler -j4
+
+      - name: Install dependencies
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            CLAY="$PWD/clay/build/Release/clay.exe"
+          else
+            CLAY="$PWD/clay/build/clay"
+          fi
+          "$CLAY" bricks install
+
+      - name: Test
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            CLAY="$PWD/clay/build/Release/clay.exe"
+          else
+            CLAY="$PWD/clay/build/clay"
+          fi
+          status=0
+          for t in tests/test_*.clay; do
+            echo "== $t"
+            "$CLAY" "$t" || status=1
+          done
+          exit $status
