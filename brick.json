@@ -16,7 +16,8 @@
       "native/libann/ann_quantize.c"
     ],
     "cflags": [],
-    "libs": [
+    "libs": [],
+    "libs-linux": [
       "-lm",
       "-lpthread"
     ],
@@ -27,6 +28,8 @@
       "-I@/native/shim"
     ],
     "libs-macos": [
+      "-lm",
+      "-lpthread",
       "-Wl,-framework,Accelerate"
     ]
   }

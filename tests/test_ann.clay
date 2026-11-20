@@ -511,12 +511,15 @@ check("the input layer has no weights", net weights(0) == nil && net biases(0) =
 w1 = net weights(1)
 check("dense weights: a row per node", w1 size == 4 && (w1 first) size == 2)
 check("dense biases: one per node", (net biases(1)) size == 4)
-check("weights are the trained ones", (net weights(2)) size == 1 && ((net weights(2)) first) size == 4)
-manual = (0..3) map { |i| ((w1 at(i)) at(0)) * 0 + ((w1 at(i)) at(1)) * 1 + (net biases(1)) at(i) }
-hidden = manual map { |z| 1 / (1 + Math exp(0 - z)) }
-w2 = (net weights(2)) first
-outZ = (0..3) toArray reduce((net biases(2)) at(0)) { |a, i| a + (w2 at(i)) * (hidden at(i)) }
-check("weights reproduce predict", ((1 / (1 + Math exp(0 - outZ))) - ((net predict([0, 1])) at(0))) abs < 0.0001)
+check("output layer weights", (net weights(2)) size == 1 && ((net weights(2)) first) size == 4)
+// a linear network computes its outputs from exactly these weights and biases
+lin = Ann network(#{"quiet": true}) input(2) dense(3, "none") output(1, "none")
+lw = lin weights(1)
+lb = lin biases(1)
+hidden = (0..2) map { |i| ((lw at(i)) at(0)) * 0.5 + ((lw at(i)) at(1)) * -2 + lb at(i) }
+ow = (lin weights(2)) first
+outZ = (0..2) toArray reduce((lin biases(2)) at(0)) { |a, i| a + (ow at(i)) * (hidden at(i)) }
+check("weights reproduce predict", (outZ - ((lin predict([0.5, -2])) at(0))) abs < 0.0001)
 check("layer out of range", (raises({ net weights(3) })) == "ArgumentError")
 cnn = Ann network(#{"quiet": true}) input(1, 6, 6) conv2d(3, 3, "relu") batchNorm maxPool2d(2) flatten embedding(5, 2)
 check("conv weights: a row per filter", (cnn weights(1)) size == 3 && ((cnn weights(1)) first) size == 9)
