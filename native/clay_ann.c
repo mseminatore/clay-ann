@@ -485,6 +485,67 @@ static ClayPluginValue net_layer_info(ClayPluginObject self, int argc, ClayPlugi
     return all;
 }
 
+/* net layerCount -> the number of layers, the input layer (0) included, as in `layers` */
+static ClayPluginValue net_layer_count(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    (void)argc; (void)argv;
+    PNetwork n = net_of(self, "layerCount");
+    return n ? api->make_int(ann_get_layer_count(n)) : 0;
+}
+
+/* layer argument 0 of who, checked against the network's layers */
+static int layer_arg(PNetwork n, const char *who, int argc, ClayPluginValue *argv, int *layer) {
+    int count = ann_get_layer_count(n);
+    if (argc < 1 || !api->is_int(argv[0]) || api->to_int(argv[0]) < 0 || api->to_int(argv[0]) >= count) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "%s needs a layer index, 0 to %d", who, count - 1);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    *layer = (int)api->to_int(argv[0]);
+    return 1;
+}
+
+/* parameter p of a layer, as rows (as_rows) or one flat Array; nil if the layer has no such parameter */
+static ClayPluginValue layer_param_value(PNetwork n, const char *who, int layer, int p, int as_rows) {
+    if (p >= ann_get_layer_param_count(n, layer)) return 0;
+    int rows = 0, cols = 0;
+    if (ann_get_layer_param_shape(n, layer, p, &rows, &cols) != ERR_OK) return 0;
+    size_t count = (size_t)rows * (size_t)cols;
+    real *buf = (real *)malloc((count ? count : 1) * sizeof(real));
+    if (!buf) { api->raise("ann: out of memory", "RuntimeError"); return 0; }
+    if (ann_get_layer_param(n, layer, p, buf, (int)count) != ERR_OK) {
+        free(buf);
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s: cannot read the layer's parameters", who);
+        api->raise(msg, "RuntimeError");
+        return 0;
+    }
+    ClayPluginValue r = api->from_floats(buf, count, as_rows ? (size_t)cols : 0);
+    free(buf);
+    return r;
+}
+
+/* net weights(layer) -> the layer's weights as rows, or nil for a layer without any (the
+ * input, pooling, flatten, reshape, upsampling). Dense: a row per node, one value per node
+ * below; conv: a row per filter (channel by channel, then the kernel row by row); embedding:
+ * a row per token id; batchNorm: one row, its scale (gamma). Initialized first, as
+ * training would start, if nothing has set them yet. */
+static ClayPluginValue net_weights(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "weights");
+    int layer;
+    if (!n || !layer_arg(n, "weights", argc, argv, &layer)) return 0;
+    return layer_param_value(n, "weights", layer, 0, 1);
+}
+
+/* net biases(layer) -> the layer's biases, one per node or filter (batchNorm: its shift,
+ * beta), or nil for a layer without them */
+static ClayPluginValue net_biases(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "biases");
+    int layer;
+    if (!n || !layer_arg(n, "biases", argc, argv, &layer)) return 0;
+    return layer_param_value(n, "biases", layer, 1, 0);
+}
+
 /* net train(inputs, targets) -> the final loss. Each is an Array of rows or an AnnData */
 static ClayPluginValue net_train(ClayPluginObject self, int argc, ClayPluginValue *argv) {
     PNetwork n = net_of(self, "train");
@@ -1681,6 +1742,256 @@ static ClayPluginValue data_argmax(ClayPluginObject self, int argc, ClayPluginVa
     return data_wrap(r);
 }
 
+/* --- principal components ----------------------------------------------- */
+
+/* The eigenvalues and eigenvectors of the symmetric n x n matrix a (row-major,
+ * destroyed), by cyclic Jacobi rotations: vals[i] and column i of vecs, sorted
+ * largest first. */
+static void jacobi_eigen(double *a, int n, double *vals, double *vecs) {
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++) vecs[i * n + j] = i == j;
+    for (int sweep = 0; sweep < 100; sweep++) {
+        double off = 0, diag = 0;
+        for (int i = 0; i < n; i++) {
+            diag += a[i * n + i] * a[i * n + i];
+            for (int j = i + 1; j < n; j++) off += a[i * n + j] * a[i * n + j];
+        }
+        if (off == 0 || off <= 1e-30 * diag) break;
+        for (int p = 0; p < n; p++)
+            for (int q = p + 1; q < n; q++) {
+                double apq = a[p * n + q];
+                if (apq == 0) continue;
+                double theta = (a[q * n + q] - a[p * n + p]) / (2 * apq);
+                double t = (theta >= 0 ? 1 : -1) / (fabs(theta) + sqrt(theta * theta + 1));
+                double c = 1 / sqrt(t * t + 1), s = t * c;
+                for (int k = 0; k < n; k++) {          /* columns p and q */
+                    double akp = a[k * n + p], akq = a[k * n + q];
+                    a[k * n + p] = c * akp - s * akq;
+                    a[k * n + q] = s * akp + c * akq;
+                }
+                for (int k = 0; k < n; k++) {          /* rows p and q */
+                    double apk = a[p * n + k], aqk = a[q * n + k];
+                    a[p * n + k] = c * apk - s * aqk;
+                    a[q * n + k] = s * apk + c * aqk;
+                }
+                for (int k = 0; k < n; k++) {
+                    double vkp = vecs[k * n + p], vkq = vecs[k * n + q];
+                    vecs[k * n + p] = c * vkp - s * vkq;
+                    vecs[k * n + q] = s * vkp + c * vkq;
+                }
+            }
+    }
+    for (int i = 0; i < n; i++) vals[i] = a[i * n + i];
+    for (int i = 0; i < n; i++) {                       /* selection sort, largest first */
+        int best = i;
+        for (int j = i + 1; j < n; j++) if (vals[j] > vals[best]) best = j;
+        if (best == i) continue;
+        double t = vals[i]; vals[i] = vals[best]; vals[best] = t;
+        for (int k = 0; k < n; k++) {
+            t = vecs[k * n + i]; vecs[k * n + i] = vecs[k * n + best]; vecs[k * n + best] = t;
+        }
+    }
+}
+
+static double pca_random(unsigned *seed) {
+    *seed = *seed * 1103515245u + 12345u;
+    return (double)(*seed >> 8) / 16777216.0 - 0.5;
+}
+
+/* orthonormalize the p columns of the d x p matrix q (modified Gram-Schmidt); a column
+ * that is (nearly) a mix of the earlier ones becomes a fresh unit vector */
+static void orthonormalize(double *q, int d, int p, unsigned *seed) {
+    for (int j = 0; j < p; j++) {
+        for (int tries = 0; tries < 3; tries++) {
+            for (int i = 0; i < j; i++) {
+                double dot = 0;
+                for (int r = 0; r < d; r++) dot += q[r * p + i] * q[r * p + j];
+                for (int r = 0; r < d; r++) q[r * p + j] -= dot * q[r * p + i];
+            }
+            double norm = 0;
+            for (int r = 0; r < d; r++) norm += q[r * p + j] * q[r * p + j];
+            norm = sqrt(norm);
+            if (norm > 1e-12) {
+                for (int r = 0; r < d; r++) q[r * p + j] /= norm;
+                break;
+            }
+            for (int r = 0; r < d; r++) q[r * p + j] = pca_random(seed);
+        }
+    }
+}
+
+/* The top k eigenvectors (rows of comps, k x d) and eigenvalues of the symmetric d x d
+ * matrix cov. Up to 64 dimensions it is solved whole by Jacobi; bigger ones by subspace
+ * iteration on k + 8 vectors, solving the projected matrix by Jacobi (Rayleigh-Ritz). */
+static int top_eigen(const double *cov, int d, int k, double *vals, double *comps) {
+    int p = d <= 64 || k + 8 >= d ? d : k + 8;
+    double *q = (double *)malloc((size_t)d * p * sizeof(double));
+    double *z = (double *)malloc((size_t)d * p * sizeof(double));
+    double *t = (double *)malloc((size_t)p * p * sizeof(double));
+    double *ev = (double *)malloc((size_t)p * sizeof(double));
+    double *u = (double *)malloc((size_t)p * p * sizeof(double));
+    double *prev = (double *)malloc((size_t)k * sizeof(double));
+    if (!q || !z || !t || !ev || !u || !prev) {
+        free(q); free(z); free(t); free(ev); free(u); free(prev);
+        return 0;
+    }
+    if (p == d) {
+        memcpy(t, cov, (size_t)d * d * sizeof(double));
+        jacobi_eigen(t, d, ev, u);
+        for (int c = 0; c < k; c++)
+            for (int r = 0; r < d; r++) comps[(size_t)c * d + r] = u[r * d + c];
+        memcpy(vals, ev, (size_t)k * sizeof(double));
+    } else {
+        unsigned seed = 12345;
+        for (int i = 0; i < d * p; i++) q[i] = pca_random(&seed);
+        orthonormalize(q, d, p, &seed);
+        for (int c = 0; c < k; c++) prev[c] = -1;
+        for (int it = 1; it <= 1000; it++) {
+            /* z = cov q */
+            for (int r = 0; r < d; r++) {
+                const double *row = cov + (size_t)r * d;
+                double *zr = z + (size_t)r * p;
+                for (int j = 0; j < p; j++) zr[j] = 0;
+                for (int l = 0; l < d; l++) {
+                    double a = row[l];
+                    if (a == 0) continue;
+                    const double *ql = q + (size_t)l * p;
+                    for (int j = 0; j < p; j++) zr[j] += a * ql[j];
+                }
+            }
+            if (it % 5 == 0 || it == 1000) {
+                /* Rayleigh-Ritz: t = q^T cov q = q^T z, then the components are q u */
+                for (int i = 0; i < p; i++)
+                    for (int j = 0; j < p; j++) {
+                        double s = 0;
+                        for (int r = 0; r < d; r++) s += q[(size_t)r * p + i] * z[(size_t)r * p + j];
+                        t[i * p + j] = s;
+                    }
+                for (int i = 0; i < p; i++)            /* symmetric, despite rounding */
+                    for (int j = i + 1; j < p; j++) t[i * p + j] = t[j * p + i] = (t[i * p + j] + t[j * p + i]) / 2;
+                jacobi_eigen(t, p, ev, u);
+                int done = 1;
+                double scale = fabs(ev[0]) > 0 ? fabs(ev[0]) : 1;
+                for (int c = 0; c < k; c++) {
+                    if (fabs(ev[c] - prev[c]) > 1e-10 * scale) done = 0;
+                    prev[c] = ev[c];
+                }
+                if (done || it == 1000) {
+                    for (int c = 0; c < k; c++)
+                        for (int r = 0; r < d; r++) {
+                            double s = 0;
+                            for (int j = 0; j < p; j++) s += q[(size_t)r * p + j] * u[j * p + c];
+                            comps[(size_t)c * d + r] = s;
+                        }
+                    memcpy(vals, ev, (size_t)k * sizeof(double));
+                    break;
+                }
+            }
+            memcpy(q, z, (size_t)d * p * sizeof(double));
+            orthonormalize(q, d, p, &seed);
+        }
+    }
+    /* a fixed sign: each component's largest entry positive */
+    for (int c = 0; c < k; c++) {
+        double *v = comps + (size_t)c * d;
+        int big = 0;
+        for (int r = 1; r < d; r++) if (fabs(v[r]) > fabs(v[big])) big = r;
+        if (v[big] < 0) for (int r = 0; r < d; r++) v[r] = -v[r];
+    }
+    free(q); free(z); free(t); free(ev); free(u); free(prev);
+    return 1;
+}
+
+#define PCA_CHUNK 512   /* rows centred at a time for the covariance */
+
+/* data _pca(k, maxRows) -> [projected, components, explained, mean] (main.clay's pca makes
+ * them a Dict): the principal components of the rows. Fitted on maxRows of them at most
+ * (evenly spaced; all by default), every row projected. The covariance is summed a chunk of
+ * centred rows at a time with libann's gemm, so the memory is cols x cols plus a chunk. */
+static ClayPluginValue data_pca(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PTensor t = self_tensor(self, "pca");
+    int k, most;
+    if (!t || !int_arg("pca", argc, argv, 0, 1, 2, 1, &k) || !int_arg("pca", argc, argv, 1, 1, 0, 0, &most)) return 0;
+    int n = t->rows, d = t->cols;
+    if (k > d) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "pca: %d components from %d columns", k, d);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    int m = most > 0 && most < n ? most : n;
+    if (m < 2) { api->raise("pca needs at least 2 rows", "ArgumentError"); return 0; }
+#define FIT_ROW(i) (m == n ? (i) : (int)(((long long)(i) * n) / m))
+
+    size_t outn = (size_t)n * k > (size_t)d * k ? (size_t)n * k : (size_t)d * k;
+    double *mean = (double *)calloc((size_t)d, sizeof(double));
+    double *cov = (double *)malloc((size_t)d * d * sizeof(double));
+    double *comps = (double *)malloc((size_t)k * d * sizeof(double));
+    double *vals = (double *)malloc((size_t)k * sizeof(double));
+    real *out = (real *)malloc((outn > (size_t)d ? outn : (size_t)d) * sizeof(real));
+    int chunk = m < PCA_CHUNK ? m : PCA_CHUNK;
+    PTensor c = tensor_zeros(d, d);
+    PTensor x = tensor_create(chunk, d);
+    PTensor tail = m % chunk ? tensor_create(m % chunk, d) : NULL;
+    ClayPluginValue res = 0;
+
+    if (mean && cov && comps && vals && out && c && x && (tail || m % chunk == 0)) {
+        for (int i = 0; i < m; i++) {
+            const real *row = t->values + (size_t)FIT_ROW(i) * d;
+            for (int j = 0; j < d; j++) mean[j] += row[j];
+        }
+        for (int j = 0; j < d; j++) mean[j] /= m;
+        for (int start = 0; start < m; start += chunk) {
+            int rows = m - start < chunk ? m - start : chunk;
+            PTensor b = rows == chunk ? x : tail;
+            for (int i = 0; i < rows; i++) {
+                const real *row = t->values + (size_t)FIT_ROW(start + i) * d;
+                real *dst = b->values + (size_t)i * d;
+                for (int j = 0; j < d; j++) dst[j] = (real)(row[j] - mean[j]);
+            }
+            tensor_gemm_transA(1, b, b, 1, c);          /* c += b^T b */
+        }
+        double total = 0;
+        for (int i = 0; i < d; i++)
+            for (int j = 0; j < d; j++) {               /* symmetric, despite rounding */
+                double v = ((double)c->values[(size_t)i * d + j] + c->values[(size_t)j * d + i]) / 2 / (m - 1);
+                cov[(size_t)i * d + j] = v;
+                if (i == j) total += v;
+            }
+        if (top_eigen(cov, d, k, vals, comps)) {
+            ClayPluginValue v;
+            res = api->array_new();
+            for (int i = 0; i < n; i++) {               /* every row, projected */
+                const real *row = t->values + (size_t)i * d;
+                for (int cc = 0; cc < k; cc++) {
+                    const double *p = comps + (size_t)cc * d;
+                    double s = 0;
+                    for (int j = 0; j < d; j++) s += (row[j] - mean[j]) * p[j];
+                    out[(size_t)i * k + cc] = (real)s;
+                }
+            }
+            v = api->from_floats(out, (size_t)n * k, (size_t)k);
+            api->array_push(res, v); api->release(v);
+            for (size_t i = 0; i < (size_t)k * d; i++) out[i] = (real)comps[i];
+            v = api->from_floats(out, (size_t)k * d, (size_t)d);
+            api->array_push(res, v); api->release(v);
+            for (int i = 0; i < k; i++) out[i] = (real)(total > 0 && vals[i] > 0 ? vals[i] / total : 0);
+            v = api->from_floats(out, (size_t)k, 0);
+            api->array_push(res, v); api->release(v);
+            for (int j = 0; j < d; j++) out[j] = (real)mean[j];
+            v = api->from_floats(out, (size_t)d, 0);
+            api->array_push(res, v); api->release(v);
+        }
+    }
+#undef FIT_ROW
+    free(mean); free(cov); free(comps); free(vals); free(out);
+    if (c) tensor_free(c);
+    if (x) tensor_free(x);
+    if (tail) tensor_free(tail);
+    if (!res) api->raise("ann: out of memory", "RuntimeError");
+    return res;
+}
+
 static ClayPluginMethod data_methods[] = {
     { "loadCsv", data_load_csv },   { "rows", data_rows },
     { "cols", data_cols },          { "slice", data_slice },
@@ -1690,7 +2001,7 @@ static ClayPluginMethod data_methods[] = {
     { "fromArray", data_from_array },{ "shuffle", data_shuffle },
     { "split", data_split },        { "mean", data_mean },
     { "std", data_std },            { "standardize", data_standardize },
-    { "argmax", data_argmax },
+    { "argmax", data_argmax },     { "_pca", data_pca },
     { NULL, NULL }
 };
 
@@ -1724,7 +2035,8 @@ static ClayPluginMethod methods[] = {
     { "globalAvgPool", net_global_avg },     { "globalMaxPool", net_global_max },
     { "upsample2d", net_upsample },          { "reshape", net_reshape },
     { "batchNorm", net_batchnorm },          { "embedding", net_embedding },
-    { "layerInfo", net_layer_info },
+    { "layerInfo", net_layer_info },         { "layerCount", net_layer_count },
+    { "weights", net_weights },              { "biases", net_biases },
     { "trainBegin", net_train_begin },       { "trainStep", net_train_step },
     { "trainEnd", net_train_end },           { "trainEpoch", net_train_epoch },
     { "saveBinary", net_save_binary },       { "loadBinary", net_load_binary },
