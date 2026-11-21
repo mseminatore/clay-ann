@@ -1134,6 +1134,49 @@ static ClayPluginValue net_predict_batch(ClayPluginObject self, int argc, ClayPl
     return r;
 }
 
+/* net activations(inputs, layer) -> layer's outputs for every row (after its activation): an
+ * AnnData for an AnnData, else an Array of rows. Each row is the layer's shape flattened:
+ * channel by channel, each channel row by row. layer counts from 0 (the inputs) as in
+ * `layers`, or from the end when negative (-1 is the output layer, -2 the one below). The
+ * forward pass stops at the layer (libann's ann_predict_layer). */
+static ClayPluginValue net_activations(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "activations");
+    if (!n) return 0;
+    int count = ann_get_layer_count(n);
+    if (argc < 2 || !api->is_int(argv[1]) || api->to_int(argv[1]) >= count || api->to_int(argv[1]) < -count) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "activations needs inputs and a layer index, 0 to %d (or -1 to -%d from the end)",
+                 count - 1, count);
+        api->raise(msg, "ArgumentError");
+        return 0;
+    }
+    int layer = (int)api->to_int(argv[1]);
+    if (layer < 0) layer += count;
+    int xo;
+    PTensor x = tensor_arg(argv[0], "inputs", &xo);
+    if (!x) return 0;
+    ClayPluginValue r = 0;
+    if (x->cols != input_size(n)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "activations: rows must have %d inputs (got %d)", input_size(n), x->cols);
+        api->raise(msg, "ArgumentError");
+    } else {
+        PTensor out = tensor_create(x->rows, n->layers[layer].node_count);
+        if (!out) api->raise("ann: out of memory", "RuntimeError");
+        else if (ann_predict_layer(n, x->values, layer, out->values, x->rows) != ERR_OK) {
+            tensor_free(out);
+            api->raise("activations: the forward pass failed", "RuntimeError");
+        } else if (xo) {
+            r = api->from_floats(out->values, (size_t)out->rows * out->cols, (size_t)out->cols);
+            tensor_free(out);
+        } else {
+            r = data_wrap(out);
+        }
+    }
+    if (xo) tensor_free(x);
+    return r;
+}
+
 /* net classifyBatch(inputs) -> the index of the largest output for every row: a one-column
  * AnnData for an AnnData, else an Array of integers */
 static ClayPluginValue net_classify_batch(ClayPluginObject self, int argc, ClayPluginValue *argv) {
@@ -2037,6 +2080,7 @@ static ClayPluginMethod methods[] = {
     { "batchNorm", net_batchnorm },          { "embedding", net_embedding },
     { "layerInfo", net_layer_info },         { "layerCount", net_layer_count },
     { "weights", net_weights },              { "biases", net_biases },
+    { "activations", net_activations },
     { "trainBegin", net_train_begin },       { "trainStep", net_train_step },
     { "trainEnd", net_train_end },           { "trainEpoch", net_train_epoch },
     { "saveBinary", net_save_binary },       { "loadBinary", net_load_binary },

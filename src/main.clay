@@ -25,6 +25,8 @@
 //       embedding(vocabulary, dimension, paddingId, masked)
 //     layers (a Dict per layer: kind, shape, activation, params), summary (a table of text)
 //     layerCount (input included), weights(layer) (rows, or nil), biases(layer) (or nil)
+//     activations(inputs, layer) -> a layer's outputs for every row (a table for a table;
+//       layer -1 is the output layer, -2 the one below)
 //       activations: "sigmoid" (default), "relu", "leaky_relu", "tanh",
 //                    "softsign", "softmax", "gelu", "none"
 //

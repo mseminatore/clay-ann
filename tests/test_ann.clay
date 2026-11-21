@@ -521,11 +521,29 @@ ow = (lin weights(2)) first
 outZ = (0..2) toArray reduce((lin biases(2)) at(0)) { |a, i| a + (ow at(i)) * (hidden at(i)) }
 check("weights reproduce predict", (outZ - ((lin predict([0.5, -2])) at(0))) abs < 0.0001)
 check("layer out of range", (raises({ net weights(3) })) == "ArgumentError")
+
 cnn = Ann network(#{"quiet": true}) input(1, 6, 6) conv2d(3, 3, "relu") batchNorm maxPool2d(2) flatten embedding(5, 2)
 check("conv weights: a row per filter", (cnn weights(1)) size == 3 && ((cnn weights(1)) first) size == 9)
 check("batchNorm: gamma and beta", (cnn weights(2)) size == 1 && (cnn biases(2)) size == 3)
 check("pooling has none", cnn weights(3) == nil)
 check("embedding: a row per id, no biases", (cnn weights(5)) size == 5 && cnn biases(5) == nil)
+
+// a layer's outputs
+acts = lin activations([[0.5, -2], [1, 1]], 1)
+check("activations: a row per input, a value per node", acts size == 2 && (acts first) size == 3)
+check("activations match the weights", ((0..2) toArray reduce(0) { |a, i| a + ((acts first) at(i) - hidden at(i)) abs }) < 0.0001)
+check("activations of the output layer are predictBatch", ((net activations(xs, -1)) at(1)) == ((net predictBatch(xs)) at(1)))
+check("activations of layer 0 are the inputs", (net activations(xs, 0)) == xs)
+check("activations -2 is the last hidden layer", (net activations(xs, -2)) == (net activations(xs, 1)))
+check("activations of a table are a table", ((net activations(AnnData fromArray(xs), 1)) rows) == 4)
+check("activations: layer out of range", (raises({ net activations(xs, 3) })) == "ArgumentError" &&
+      (raises({ net activations(xs, -4) })) == "ArgumentError")
+check("activations: wrong input width", (raises({ net activations([[1, 2, 3]], 1) })) == "ArgumentError")
+img = (0..35) map { |i| (i % 7) / 7.0 }
+fm = cnn activations([img], 1)
+check("conv activations: filters x height x width per row", fm size == 1 && (fm first) size == 48)
+relu = (fm first) find { |v| v < 0 }
+check("conv activations are after the relu", relu == nil)
 
 // principal components of a table
 line = AnnData fromArray((0..49) map { |i| t = i / 10.0; [t, 2 * t + 1, 0 - t + ((i % 2) * 0.01)] })

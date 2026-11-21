@@ -111,6 +111,18 @@ total parameters: 27562
 Before any training they are the values training would start from. They are copies: changing
 the Arrays doesn't change the network.
 
+`net activations(inputs, layer)` is what a layer outputs for every row, after its activation:
+an AnnData for an AnnData, else an Array of rows. `layer` counts as in `net layers`, or from the
+end when negative (`-1` is the output layer, `-2` the one below it). A conv layer's row is its
+feature maps one after another, each row by row (`layers` gives the shape). The forward pass
+stops at the layer, so it is quicker than `predictBatch`, and nothing is kept from the hidden
+layers when you don't ask:
+
+```clay norun
+codes = net activations(x, -2)                 // the last hidden layer, e.g. for clay-plot's embedding
+maps = net activations([image], 1)             // one image's first conv feature maps
+```
+
 Everything else works on these networks as before: `train`, `fit`, `predictBatch`, `save`,
 `quantize` and the exports. Mistakes (a convolution with no input layer, a window bigger than its
 input, a `reshape` that changes the size) raise `ArgumentError`.
