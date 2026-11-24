@@ -256,15 +256,32 @@ second. The methods below return new tables, so they chain; `to` is exclusive an
 | `columns(from, to)` | those columns |
 | `column(n)` | one column, as a one-column table |
 | `oneHot(classes)` | a one-column table of labels `0..classes-1` as rows of `classes` columns |
-| `scale(divisor)` | every value divided by `divisor` |
+| `scale(divisor)` | every value divided by `divisor`; an Array of one divisor per column divides each column by its own: `x scale(x max)` puts every column in 0 to 1 (a column whose divisor is 0 is left as it is) |
 | `row(i)` | row `i` as an Array |
 | `AnnData fromArray(rows)` | a table from an Array of rows |
 | `shuffle` | the rows in random order (repeatable after `Ann seed(n)`) |
 | `split(fraction)` | `[first, rest]`: `split(0.8)` is an 80% / 20% split (shuffle first) |
 | `mean`, `std` | the mean and standard deviation of each column, as Arrays |
+| `min`, `max`, `median` | the smallest, largest and middle value of each column, as Arrays (the median of an even number of rows is the mean of the middle two) |
 | `standardize` | every column shifted to mean 0 and scaled to standard deviation 1 |
 | `argmax` | a one-column table: the index of the largest value in each row |
 | `toArray` | an Array of rows (boxes every value, so avoid on big tables) |
+
+`mean`, `std`, `min`, `max` and `median` return one value per column as an Array, and `scale` takes
+such an Array, so a table can be normalized in a single pass over its columns:
+
+```clay norun
+parts = (Ann loadCsv("measurements.csv", true)) split(0.8)
+train = parts at(0)
+test = parts at(1)
+top = train max                                  // each column's largest value in the training rows
+x = train scale(top)                             // every column divided by its own: 0 to 1
+xTest = test scale(top)                          // the test rows by the same divisors
+```
+
+Any Array of one divisor per column works, such as a scale you know in advance
+(`data scale([255, 100, 1])`). A column whose divisor is 0 is left as it is, which keeps columns
+that are always 0 (MNIST's border pixels) from failing.
 
 ## Speed
 

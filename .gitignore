@@ -1,4 +1,7 @@
 # the plugin built on first use (clay native bricks)
 build/
+
 # editor settings (machine-specific)
 .vscode/
+.DS_Store
+
