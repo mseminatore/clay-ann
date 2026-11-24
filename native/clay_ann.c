@@ -686,9 +686,24 @@ static ClayPluginValue net_embedding(ClayPluginObject self, int argc, ClayPlugin
                        masked ? ann_add_embedding_masked(n, vocab, dim, pad) : ann_add_embedding(n, vocab, dim, pad));
 }
 
+static const struct { const char *name; Weight_format format; } weight_formats[] = {
+    { "float", WEIGHT_FORMAT_FLOAT },   { "int4", WEIGHT_FORMAT_INT4 },
+    { "ternary", WEIGHT_FORMAT_TERNARY }, { "binary", WEIGHT_FORMAT_BINARY },
+};
+
+//---------------------------------------------------------------------------------
+// a weight format's name, as weightFormat takes it
+//---------------------------------------------------------------------------------
+static const char *weight_format_name(Weight_format f) {
+    for (size_t i = 0; i < sizeof(weight_formats) / sizeof(weight_formats[0]); i++)
+        if (weight_formats[i].format == f) return weight_formats[i].name;
+
+    return "float";
+}
+
 //---------------------------------------------------------------------------------
 // net layerInfo -> one row per layer: [kind, channels, height, width,
-// activation, parameters]
+// activation, parameters, trainable, weight format]
 //---------------------------------------------------------------------------------
 static ClayPluginValue net_layer_info(ClayPluginObject self, int argc, ClayPluginValue *argv) {
     CLAY_UNUSED(argc); CLAY_UNUSED(argv);
@@ -716,7 +731,7 @@ static ClayPluginValue net_layer_info(ClayPluginObject self, int argc, ClayPlugi
         }
 
         ClayPluginValue row = api->array_new();
-        ClayPluginValue v[6];
+        ClayPluginValue v[8];
 
         v[0] = api->make_string(kname);
         v[1] = api->make_int(c);
@@ -724,8 +739,10 @@ static ClayPluginValue net_layer_info(ClayPluginObject self, int argc, ClayPlugi
         v[3] = api->make_int(w);
         v[4] = api->make_string(i == 0 ? "none" : activation_name(ann_get_layer_activation(n, i)));
         v[5] = api->make_int((intptr_t)params);
+        v[6] = api->make_bool(ann_get_layer_trainable(n, i));
+        v[7] = api->make_string(weight_format_name(ann_get_layer_weight_format(n, i)));
 
-        for (int k = 0; k < 6; k++) {
+        for (int k = 0; k < 8; k++) {
             api->array_push(row, v[k]);
             api->release(v[k]);
         }
@@ -836,6 +853,211 @@ static ClayPluginValue net_biases(ClayPluginObject self, int argc, ClayPluginVal
     if (!n || !layer_arg(n, "biases", argc, argv, &layer)) return CLAY_NIL;
 
     return layer_param_value(n, "biases", layer, 1, 0);
+}
+
+//---------------------------------------------------------------------------------
+// set parameter p (0 the weights, 1 the biases) of a layer from argv[1]: rows as weights
+// gives them, a flat Array of every value in order, or an AnnData table. Rows and tables
+// must have the parameter's shape; a flat Array, its number of values.
+//---------------------------------------------------------------------------------
+static ClayPluginValue layer_param_set(ClayPluginObject self, const char *who, const char *what, int p,
+                                       int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, who);
+    int layer;
+
+    if (!n || !layer_arg(n, who, argc, argv, &layer)) return CLAY_NIL;
+
+    int rows = 0;
+    int cols = 0;
+
+    if (p >= ann_get_layer_param_count(n, layer) || ann_get_layer_param_shape(n, layer, p, &rows, &cols) != ERR_OK) {
+        char msg[128];
+
+        snprintf(msg, sizeof(msg), "%s: layer %d has no %s", who, layer, what);
+
+        api->raise(msg, "ArgumentError");
+
+        return CLAY_NIL;
+    }
+
+    size_t count = (size_t)rows * (size_t)cols;
+    PTensor t = argc > 1 ? data_of(argv[1]) : NULL;
+    int shaped = 1;
+    size_t got = 0;
+
+    if (t) {
+        got = (size_t)t->rows * (size_t)t->cols;
+        shaped = t->rows == rows && t->cols == cols;
+    } else if (argc > 1 && api->is_array(argv[1])) {
+        size_t len = api->array_size(argv[1]);
+
+        // raises TypeError on anything but numbers
+        got = api->to_floats(argv[1], NULL, 0);
+
+        if (len > 0 && api->is_array(api->array_get(argv[1], 0))) {
+            shaped = len == (size_t)rows;
+
+            for (size_t i = 0; shaped && i < len; i++) {
+                ClayPluginValue row = api->array_get(argv[1], i);
+
+                shaped = api->is_array(row) && api->array_size(row) == (size_t)cols;
+            }
+        }
+    } else {
+        char msg[128];
+
+        snprintf(msg, sizeof(msg), "%s needs a layer and its %s: rows, an Array or an AnnData", who, what);
+
+        api->raise(msg, "ArgumentError");
+
+        return CLAY_NIL;
+    }
+
+    if (got != count || !shaped) {
+        char msg[160];
+
+        snprintf(msg, sizeof(msg), "%s: layer %d's %s are %d x %d (%lu values), as %s gives them",
+                 who, layer, what, rows, cols, (unsigned long)count, what);
+
+        api->raise(msg, "ArgumentError");
+
+        return CLAY_NIL;
+    }
+
+    real *buf = NULL;
+
+    if (!t) {
+        buf = (real *)malloc((count ? count : 1) * sizeof(real));
+
+        if (!buf) {
+            api->raise("ann: out of memory", "RuntimeError");
+
+            return CLAY_NIL;
+        }
+
+        api->to_floats(argv[1], buf, count);
+    }
+
+    int rc = ann_set_layer_param(n, layer, p, t ? t->values : buf, (int)count);
+
+    free(buf);
+
+    if (rc != ERR_OK) {
+        raise_code(who, rc, "the values must be finite numbers");
+
+        return CLAY_NIL;
+    }
+
+    return (ClayPluginValue)self;
+}
+
+//---------------------------------------------------------------------------------
+// net setWeights(layer, values) -> net: the layer's weights, in the shape weights gives
+// (rows, or one flat Array, or an AnnData), e.g. pre-trained embedding vectors. Training
+// starts from them instead of random values; freeze the layer to keep them.
+//---------------------------------------------------------------------------------
+static ClayPluginValue net_set_weights(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    return layer_param_set(self, "setWeights", "weights", 0, argc, argv);
+}
+
+//---------------------------------------------------------------------------------
+// net setBiases(layer, values) -> net: the layer's biases, one per node or filter
+// (batchNorm: its shift, beta)
+//---------------------------------------------------------------------------------
+static ClayPluginValue net_set_biases(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    return layer_param_set(self, "setBiases", "biases", 1, argc, argv);
+}
+
+//---------------------------------------------------------------------------------
+// freeze or unfreeze a layer (argument 0); the input layer has nothing to train
+//---------------------------------------------------------------------------------
+static ClayPluginValue set_trainable(ClayPluginObject self, const char *who, int trainable,
+                                     int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, who);
+    int layer;
+
+    if (!n || !layer_arg(n, who, argc, argv, &layer)) return CLAY_NIL;
+
+    if (layer == 0) {
+        char msg[96];
+
+        snprintf(msg, sizeof(msg), "%s: layer 0 is the input, which has nothing to train", who);
+
+        api->raise(msg, "ArgumentError");
+
+        return CLAY_NIL;
+    }
+
+    int rc = ann_set_layer_trainable(n, layer, trainable);
+
+    if (rc != ERR_OK) {
+        raise_code(who, rc, "cannot change the layer");
+
+        return CLAY_NIL;
+    }
+
+    return (ClayPluginValue)self;
+}
+
+//---------------------------------------------------------------------------------
+// net freeze(layer) -> net: training leaves the layer's weights and biases as they are
+// (gradients still pass through it to the layers below). Saves keep the setting.
+//---------------------------------------------------------------------------------
+static ClayPluginValue net_freeze(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    return set_trainable(self, "freeze", 0, argc, argv);
+}
+
+//---------------------------------------------------------------------------------
+// net unfreeze(layer) -> net: training updates the layer again
+//---------------------------------------------------------------------------------
+static ClayPluginValue net_unfreeze(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    return set_trainable(self, "unfreeze", 1, argc, argv);
+}
+
+//---------------------------------------------------------------------------------
+// net weightFormat(format) or weightFormat(layer, format) -> net: store dense and conv
+// weights in "int4", "ternary" or "binary" (4, 2 or 1 bits each), or "float" again. With no
+// layer, every dense and conv layer but the output layer. Training from then on is
+// quantization-aware (it computes with the low-bit weights), and quantize and the exports
+// pack them. Low-bit layers train on the CPU.
+//---------------------------------------------------------------------------------
+static ClayPluginValue net_weight_format(ClayPluginObject self, int argc, ClayPluginValue *argv) {
+    PNetwork n = net_of(self, "weightFormat");
+
+    if (!n) return CLAY_NIL;
+
+    int layer = -1;
+    int fi = 0;
+
+    if (argc > 1 && !api->is_nil(argv[1])) {
+        if (!layer_arg(n, "weightFormat", argc, argv, &layer)) return CLAY_NIL;
+
+        fi = 1;
+    }
+
+    const char *name = str_arg(argc, argv, fi, NULL);
+    int found = -1;
+
+    for (size_t i = 0; name && i < sizeof(weight_formats) / sizeof(weight_formats[0]); i++)
+        if (str_eq(name, weight_formats[i].name)) found = (int)i;
+
+    if (found < 0) {
+        api->raise("weightFormat needs \"float\", \"int4\", \"ternary\" or \"binary\" (after a layer, for one layer)",
+                   "ArgumentError");
+
+        return CLAY_NIL;
+    }
+
+    Weight_format f = weight_formats[found].format;
+    int rc = layer < 0 ? ann_set_weight_format(n, f) : ann_set_layer_weight_format(n, layer, f);
+
+    if (rc != ERR_OK) {
+        raise_code("weightFormat", rc, layer < 0 ? "cannot set the format" : "only dense and conv layers have a weight format");
+
+        return CLAY_NIL;
+    }
+
+    return (ClayPluginValue)self;
 }
 
 //---------------------------------------------------------------------------------
@@ -3477,6 +3699,9 @@ static ClayPluginMethod methods[] = {
     { "batchNorm", net_batchnorm },          { "embedding", net_embedding },
     { "layerInfo", net_layer_info },         { "layerCount", net_layer_count },
     { "weights", net_weights },              { "biases", net_biases },
+    { "setWeights", net_set_weights },       { "setBiases", net_set_biases },
+    { "freeze", net_freeze },                { "unfreeze", net_unfreeze },
+    { "weightFormat", net_weight_format },
     { "activations", net_activations },
     { "trainBegin", net_train_begin },       { "trainStep", net_train_step },
     { "trainEnd", net_train_end },           { "trainEpoch", net_train_epoch },

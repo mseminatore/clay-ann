@@ -111,6 +111,27 @@ total parameters: 27562
 Before any training they are the values training would start from. They are copies: changing
 the Arrays doesn't change the network.
 
+`net setWeights(i, values)` and `net setBiases(i, values)` change them. `values` is in the shape
+`weights` and `biases` give it (rows, or one Array), a flat Array of every value in order, or an
+AnnData table, so pre-trained vectors can come from a CSV file. Training starts from the values
+instead of random ones. A wrong shape raises `ArgumentError`, and nothing changes.
+
+`net freeze(i)` keeps layer `i`'s weights and biases as they are while the rest of the network
+trains (gradients still pass through it to the layers below), and `net unfreeze(i)` lets it train
+again. Both return the network. Saves keep frozen layers frozen. Together they fine-tune a
+trained network, or keep pre-trained embedding vectors fixed:
+
+```clay norun
+vectors = Ann loadCsv("glove_50d.csv")         // one row of 50 numbers per token id
+net = Ann network(#{"loss": "cross_entropy"}) input(20) embedding(vectors rows, 50) flatten
+net output(2, "softmax")
+net setWeights(1, vectors) freeze(1)           // learn only the layers above
+net train(x, y)
+```
+
+`net layers` gives each layer's `trainable` (false once frozen) and `weightFormat` (below), and
+`net summary` marks frozen and low-bit layers.
+
 `net activations(inputs, layer)` is what a layer outputs for every row, after its activation:
 an AnnData for an AnnData, else an Array of rows. `layer` counts as in `net layers`, or from the
 end when negative (`-1` is the output layer, `-2` the one below it). A conv layer's row is its
@@ -189,6 +210,7 @@ Mistakes such as the wrong number of inputs, ragged rows or an unknown activatio
 | `exportJs(path)` | the float32 network as a JavaScript module for the browser or Node |
 | `diagram(path)` | the layers as a [pikchr](https://pikchr.org) diagram |
 | `quantize(inputs)` | an int8 copy of the network (an `AnnQuant`), its value ranges found by running `inputs` (a few hundred training rows are enough) |
+| `weightFormat(format)`, `weightFormat(layer, format)` | store dense and conv weights in `"int4"`, `"ternary"` or `"binary"` (4, 2 or 1 bits each), or `"float"` again; without a layer, every dense and conv layer but the output layer. Returns the network |
 
 An `AnnQuant` has `predict(row)`, `classify(row)`, `accuracy(inputs, targets)`, `ioParams`
 (`[inputScale, inputZeroPoint, outputScale, outputZeroPoint]`) and `exportC(path, prefix)`, which
@@ -199,6 +221,23 @@ q = net quantize(x slice(0, 500))
 Console println("float ${net accuracy(xTest, yTest)}  int8 ${q accuracy(xTest, yTest)}")
 q exportC("model_q.h", "model")
 ```
+
+Low-bit weights make exported models much smaller. Once a layer has a format, it computes with
+its weights rounded to it: `predict`, `accuracy` and the exports all use them, `quantize` packs
+them in its int8 model, and training is quantization-aware (it updates float weights underneath
+the rounded ones, which `weights` reads). The usual recipe is to train in float, set the formats,
+then train a few more epochs so the network adjusts to them:
+
+```clay norun
+net train(x, y)
+net weightFormat("ternary")                    // 2 bits per weight, the output layer stays float
+net fit(x, y, #{"epochs": 5})                  // fine-tune with the rounded weights
+q = net quantize(x slice(0, 500))
+q exportC("model_q.h", "model")
+```
+
+Low-bit layers train on the CPU. Saves keep the formats, but older versions of libann can't load
+such files, and `exportOnnx` writes the rounded weights as floats.
 
 An exported header or module needs libann's small runtime beside it: copy `ann_rt.h` (for C) or
 `ann_rt.js` (for JavaScript) from the brick's `native/libann/` directory. Both exports use the

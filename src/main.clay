@@ -25,6 +25,11 @@
 //       embedding(vocabulary, dimension, paddingId, masked)
 //     layers (a Dict per layer: kind, shape, activation, params), summary (a table of text)
 //     layerCount (input included), weights(layer) (rows, or nil), biases(layer) (or nil)
+//     setWeights(layer, values), setBiases(layer, values): in the shapes weights and biases
+//       give (or a flat Array, or an AnnData), e.g. pre-trained embedding vectors
+//     freeze(layer), unfreeze(layer): training leaves a frozen layer's parameters alone
+//     weightFormat(format) or weightFormat(layer, format): "float", "int4", "ternary" or
+//       "binary" weights for dense and conv layers (all but the output layer without a layer)
 //     activations(inputs, layer) -> a layer's outputs for every row (a table for a table;
 //       layer -1 is the output layer, -2 the one below)
 //       activations: "sigmoid" (default), "relu", "leaky_relu", "tanh",
@@ -249,7 +254,8 @@ Ann = Object clone {
     _layers(net) {
         info = net layerInfo
         info map { |r|
-            #{"kind": r at(0), "shape": [r at(1), r at(2), r at(3)], "activation": r at(4), "params": r at(5)}
+            #{"kind": r at(0), "shape": [r at(1), r at(2), r at(3)], "activation": r at(4), "params": r at(5),
+              "trainable": r at(6), "weightFormat": r at(7)}
         }
     }
 
@@ -267,8 +273,12 @@ Ann = Object clone {
             sh = l get("shape")
             shape = (sh at(0)) toString + "x" + (sh at(1)) toString + "x" + (sh at(2)) toString
             ((sh at(1)) == 1 && (sh at(2)) == 1) ifTrue { shape = (sh at(0)) toString }
+            // what changes how the layer trains: frozen, low-bit weights
+            notes = ""
+            (((l get("trainable")) == false) && ((l get("params")) > 0)) ifTrue { notes = notes + " frozen" }
+            ((l get("weightFormat")) != "float") ifTrue { notes = notes + " " + (l get("weightFormat")) }
             out = out + (cell(i, 4)) + (cell(l get("kind"), 18)) + (cell(shape, 16)) +
-                  (cell(l get("activation"), 12)) + (l get("params")) toString + "\n"
+                  (cell(l get("activation"), 12)) + (l get("params")) toString + notes + "\n"
             total = total + (l get("params"))
             i = i + 1
         }
@@ -299,7 +309,8 @@ AnnNet setMethod("fit", { |x, y, options| Ann _fit(self, x, y, options) })
 
 // net layers: one Dict per layer, input first: kind ("input", "dense", "conv2d", "maxpool2d",
 // "flatten", ...), shape ([channels, height, width]; dense layers are [nodes, 1, 1]),
-// activation and params (the number of weights and biases)
+// activation, params (the number of weights and biases), trainable (false once frozen) and
+// weightFormat ("float", "int4", "ternary" or "binary")
 AnnNet setMethod("layers", { Ann _layers(self) })
 
 // net summary: the layers as a table of text, with the total number of parameters.

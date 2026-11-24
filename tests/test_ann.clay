@@ -545,6 +545,67 @@ check("batchNorm: gamma and beta", (cnn weights(2)) size == 1 && (cnn biases(2))
 check("pooling has none", cnn weights(3) == nil)
 check("embedding: a row per id, no biases", (cnn weights(5)) size == 5 && cnn biases(5) == nil)
 
+// setting weights and biases
+sl = Ann network(#{"quiet": true}) input(2) dense(2, "none") output(1, "none")
+check("set weights and biases chain", (sl setWeights(1, [[1, 2], [3, 4]]) setBiases(1, [0.5, -0.5]) setWeights(2, [[1, 1]]) setBiases(2, [0])) == sl)
+check("the network computes with them", (sl predict([1, 1])) == [10])     // (1+2+0.5) + (3+4-0.5)
+check("weights reads them back", sl weights(1) == [[1, 2], [3, 4]] && sl biases(1) == [0.5, -0.5])
+sl setWeights(1, [4, 3, 2, 1])
+check("a flat Array, in order", sl weights(1) == [[4, 3], [2, 1]])
+sl setWeights(1, AnnData fromArray([[1, 0], [0, 1]]))
+check("or a table", sl weights(1) == [[1, 0], [0, 1]])
+check("rows must have the shape", (raises({ sl setWeights(1, [[1, 2, 3], [4, 5, 6]]) })) == "ArgumentError")
+check("a flat Array must have every value", (raises({ sl setWeights(1, [1, 2, 3]) })) == "ArgumentError")
+check("a table must have the shape", (raises({ sl setWeights(1, AnnData fromArray([[1, 2, 3, 4]])) })) == "ArgumentError")
+check("numbers only", (raises({ sl setWeights(1, [[1, "x"], [3, 4]]) })) == "TypeError")
+check("finite numbers only", (raises({ sl setWeights(1, [[1, 2], [3, 0 / 0.0]]) })) == "ArgumentError")
+check("set needs values", (raises({ sl setWeights(1) })) == "ArgumentError")
+check("a layer without weights", (raises({ sl setWeights(0, [1]) })) == "ArgumentError")
+check("a layer without biases", (raises({ cnn setBiases(5, [1]) })) == "ArgumentError")
+check("a failed set changes nothing", sl weights(1) == [[1, 0], [0, 1]])
+
+// freezing layers: pre-trained embedding vectors kept while the rest trains
+vecs = [[1, 0], [0, 1], [1, 1], [0, 0]]
+emb = Ann network(#{"quiet": true, "epochs": 20}) input(3) embedding(4, 2) flatten output(1, "none")
+emb setWeights(1, AnnData fromArray(vecs)) freeze(1)
+outW = emb weights(3)
+emb train([[0, 1, 2], [3, 2, 1]], [[1], [0]])
+check("a frozen layer keeps its weights", emb weights(1) == vecs)
+check("the others train", emb weights(3) != outW)
+check("layers shows it", ((emb layers) map { |l| l get("trainable") }) == [true, false, true, true])
+check("summary marks it", (emb summary) contains("frozen"))
+emb unfreeze(1)
+emb train([[0, 1, 2], [3, 2, 1]], [[1], [0]])
+check("unfrozen, it trains again", emb weights(1) != vecs)
+check("the input can't be frozen", (raises({ emb freeze(0) })) == "ArgumentError")
+check("freeze: layer out of range", (raises({ emb freeze(4) })) == "ArgumentError")
+
+// low-bit weights
+lb = Ann network(#{"quiet": true, "epochs": 30}) input(2) dense(8, "tanh") dense(4, "tanh") output(1, "sigmoid")
+check("float by default", ((lb layers) map { |l| l get("weightFormat") }) == ["float", "float", "float", "float"])
+check("weightFormat chains", (lb weightFormat("ternary")) == lb)
+check("all but the output layer", ((lb layers) map { |l| l get("weightFormat") }) == ["float", "ternary", "ternary", "float"])
+lb weightFormat(3, "int4") weightFormat(1, "binary")
+check("one layer at a time", ((lb layers) map { |l| l get("weightFormat") }) == ["float", "binary", "ternary", "int4"])
+check("summary shows the format", (lb summary) contains("binary"))
+check("it trains low-bit", (lb train(xs, ys)) >= 0)
+lb freeze(2)
+lbDir = File tempDir
+lbPath = lbDir + "/lowbit.nna"
+lb save(lbPath)
+lback = Ann load(lbPath)
+File delete(lbPath)
+File delete(lbDir)
+check("saves keep formats and frozen layers",
+      ((lback layers) map { |l| [l get("weightFormat"), l get("trainable")] }) ==
+      [["float", true], ["binary", true], ["ternary", false], ["int4", true]])
+check("the loaded network predicts the same", (lback predict([1, 0])) == (lb predict([1, 0])))
+check("only known formats", (raises({ lb weightFormat("int8") })) == "ArgumentError")
+check("only dense and conv layers", (raises({ cnn weightFormat(3, "int4") })) == "ArgumentError")
+check("not the input", (raises({ lb weightFormat(0, "int4") })) == "ArgumentError")
+lb weightFormat("float")
+check("float again", ((lb layers) at(1)) get("weightFormat") == "float")
+
 // a layer's outputs
 acts = lin activations([[0.5, -2], [1, 1]], 1)
 check("activations: a row per input, a value per node", acts size == 2 && (acts first) size == 3)
