@@ -24,6 +24,9 @@
 //       flatten, globalAvgPool, globalMaxPool, upsample2d(scale), reshape(c, h, w),
 //       embedding(vocabulary, dimension, paddingId, masked)
 //     layers (a Dict per layer: kind, shape, activation, params), summary (a table of text)
+//     layerCount (input included), weights(layer) (rows, or nil), biases(layer) (or nil)
+//     activations(inputs, layer) -> a layer's outputs for every row (a table for a table;
+//       layer -1 is the output layer, -2 the one below)
 //       activations: "sigmoid" (default), "relu", "leaky_relu", "tanh",
 //                    "softsign", "softmax", "gelu", "none"
 //
@@ -237,6 +240,12 @@ Ann = Object clone {
         history
     }
 
+    // The body of AnnData's pca (below): the native _pca's results as a Dict
+    _pca(data, k, maxRows) {
+        r = data _pca(k ?? 2, maxRows)
+        #{"projected": r at(0), "components": r at(1), "explained": r at(2), "mean": r at(3)}
+    }
+
     _layers(net) {
         info = net layerInfo
         info map { |r|
@@ -296,3 +305,9 @@ AnnNet setMethod("layers", { Ann _layers(self) })
 // net summary: the layers as a table of text, with the total number of parameters.
 // Print it with `net summary println`.
 AnnNet setMethod("summary", { Ann _summary(self) })
+
+// data pca(k, maxRows): the table's first k principal components (k defaults to 2), as a Dict:
+// projected (every row as k numbers, an Array of rows), components (k unit vectors over the
+// columns, the most variance first), explained (the fraction of the variance each holds) and
+// mean (each column's). Fitted on maxRows rows at most (evenly spaced), or on all of them.
+AnnData setMethod("pca", { |k, maxRows| Ann _pca(self, k, maxRows) })

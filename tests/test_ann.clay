@@ -522,6 +522,67 @@ bad input(2)
 bad output(2, "relu")
 check("cross_entropy needs softmax or sigmoid", (raises({ bad train([[0, 0]], [[1, 0]]) })) == "ArgumentError")
 
+// weights and biases of each layer
+check("layerCount includes the input", net layerCount == 3)
+check("the input layer has no weights", net weights(0) == nil && net biases(0) == nil)
+w1 = net weights(1)
+check("dense weights: a row per node", w1 size == 4 && (w1 first) size == 2)
+check("dense biases: one per node", (net biases(1)) size == 4)
+check("output layer weights", (net weights(2)) size == 1 && ((net weights(2)) first) size == 4)
+// a linear network computes its outputs from exactly these weights and biases
+lin = Ann network(#{"quiet": true}) input(2) dense(3, "none") output(1, "none")
+lw = lin weights(1)
+lb = lin biases(1)
+hidden = (0..2) map { |i| ((lw at(i)) at(0)) * 0.5 + ((lw at(i)) at(1)) * -2 + lb at(i) }
+ow = (lin weights(2)) first
+outZ = (0..2) toArray reduce((lin biases(2)) at(0)) { |a, i| a + (ow at(i)) * (hidden at(i)) }
+check("weights reproduce predict", (outZ - ((lin predict([0.5, -2])) at(0))) abs < 0.0001)
+check("layer out of range", (raises({ net weights(3) })) == "ArgumentError")
+
+cnn = Ann network(#{"quiet": true}) input(1, 6, 6) conv2d(3, 3, "relu") batchNorm maxPool2d(2) flatten embedding(5, 2)
+check("conv weights: a row per filter", (cnn weights(1)) size == 3 && ((cnn weights(1)) first) size == 9)
+check("batchNorm: gamma and beta", (cnn weights(2)) size == 1 && (cnn biases(2)) size == 3)
+check("pooling has none", cnn weights(3) == nil)
+check("embedding: a row per id, no biases", (cnn weights(5)) size == 5 && cnn biases(5) == nil)
+
+// a layer's outputs
+acts = lin activations([[0.5, -2], [1, 1]], 1)
+check("activations: a row per input, a value per node", acts size == 2 && (acts first) size == 3)
+check("activations match the weights", ((0..2) toArray reduce(0) { |a, i| a + ((acts first) at(i) - hidden at(i)) abs }) < 0.0001)
+check("activations of the output layer are predictBatch", ((net activations(xs, -1)) at(1)) == ((net predictBatch(xs)) at(1)))
+check("activations of layer 0 are the inputs", (net activations(xs, 0)) == xs)
+check("activations -2 is the last hidden layer", (net activations(xs, -2)) == (net activations(xs, 1)))
+check("activations of a table are a table", ((net activations(AnnData fromArray(xs), 1)) rows) == 4)
+check("activations: layer out of range", (raises({ net activations(xs, 3) })) == "ArgumentError" &&
+      (raises({ net activations(xs, -4) })) == "ArgumentError")
+check("activations: wrong input width", (raises({ net activations([[1, 2, 3]], 1) })) == "ArgumentError")
+img = (0..35) map { |i| (i % 7) / 7.0 }
+fm = cnn activations([img], 1)
+check("conv activations: filters x height x width per row", fm size == 1 && (fm first) size == 48)
+relu = (fm first) find { |v| v < 0 }
+check("conv activations are after the relu", relu == nil)
+
+// principal components of a table
+line = AnnData fromArray((0..49) map { |i| t = i / 10.0; [t, 2 * t + 1, 0 - t + ((i % 2) * 0.01)] })
+p = line pca(2)
+c1 = (p get("components")) first
+check("pca shapes", (p get("projected")) size == 50 && ((p get("projected")) first) size == 2 &&
+      (p get("components")) size == 2 && (p get("mean")) size == 3)
+check("pca finds the line's direction", ((c1 at(1)) / (c1 at(0)) - 2) abs < 0.001 && ((c1 at(2)) / (c1 at(0)) + 1) abs < 0.001)
+check("pca explains the variance", ((p get("explained")) first) > 0.999)
+check("pca mean", (((p get("mean")) at(1)) - 5.9) abs < 0.001)
+check("pca projections are centred", ((p get("projected")) reduce(0) { |a, r| a + r first }) abs < 0.01)
+big = AnnData fromArray((0..299) map { |i| (0..99) map { |j| ((i * 7 + j * 13) % 17) + ((j < 3) ifTrue { i % 10 } ifFalse { 0 }) } })
+pb = big pca(3)
+cs = pb get("components")
+dot = { |a, b| (0..(a size - 1)) toArray reduce(0) { |s, j| s + (a at(j)) * (b at(j)) } }
+check("pca on 100 columns: unit, orthogonal components", ((dot value(cs at(0), cs at(0))) - 1) abs < 0.001 &&
+      (dot value(cs at(0), cs at(1))) abs < 0.001 && (dot value(cs at(1), cs at(2))) abs < 0.001)
+ex = pb get("explained")
+check("pca: most variance first", (ex at(0)) >= (ex at(1)) && (ex at(1)) >= (ex at(2)))
+check("pca maxRows still projects every row", ((big pca(2, 50)) get("projected")) size == 300)
+check("pca: too many components", (raises({ line pca(4) })) == "ArgumentError")
+
 // errors are Clay errors, not crashes
 check("wrong input width", (raises({ net predict([1, 2, 3]) })) == "ArgumentError")
 check("ragged rows", (raises({ net train([[1, 2], [3]], [[1], [0]]) })) == "ArgumentError")

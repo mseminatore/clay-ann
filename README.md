@@ -98,6 +98,31 @@ a table of text with the total number of parameters:
 total parameters: 27562
 ```
 
+`net layerCount` is the number of layers, the input layer (0) included, and `net weights(i)` and
+`net biases(i)` read layer `i`'s parameters, or give `nil` for a layer without them:
+
+| Layer | `weights(i)` | `biases(i)` |
+|-------|--------------|-------------|
+| dense | a row per node, one value per node below | one per node |
+| conv2d, conv1d | a row per filter: channel by channel, then the kernel row by row | one per filter |
+| embedding | a row per token id | `nil` |
+| batchNorm | one row: the scale (gamma) of each channel | the shift (beta) of each channel |
+
+Before any training they are the values training would start from. They are copies: changing
+the Arrays doesn't change the network.
+
+`net activations(inputs, layer)` is what a layer outputs for every row, after its activation:
+an AnnData for an AnnData, else an Array of rows. `layer` counts as in `net layers`, or from the
+end when negative (`-1` is the output layer, `-2` the one below it). A conv layer's row is its
+feature maps one after another, each row by row (`layers` gives the shape). The forward pass
+stops at the layer, so it is quicker than `predictBatch`, and nothing is kept from the hidden
+layers when you don't ask:
+
+```clay norun
+codes = net activations(x, -2)                 // the last hidden layer, e.g. for clay-plot's embedding
+maps = net activations([image], 1)             // one image's first conv feature maps
+```
+
 Everything else works on these networks as before: `train`, `fit`, `predictBatch`, `save`,
 `quantize` and the exports. Mistakes (a convolution with no input layer, a window bigger than its
 input, a `reshape` that changes the size) raise `ArgumentError`.
@@ -265,6 +290,7 @@ second. The methods below return new tables, so they chain; `to` is exclusive an
 | `min`, `max`, `median` | the smallest, largest and middle value of each column, as Arrays (the median of an even number of rows is the mean of the middle two) |
 | `standardize` | every column shifted to mean 0 and scaled to standard deviation 1 |
 | `argmax` | a one-column table: the index of the largest value in each row |
+| `pca(k, maxRows)` | the first `k` principal components (2 by default): a Dict of `projected` (every row as `k` numbers), `components` (`k` unit vectors over the columns, most variance first), `explained` (the fraction of the variance each holds) and `mean`. Fitted on `maxRows` evenly spaced rows at most, or on all |
 | `toArray` | an Array of rows (boxes every value, so avoid on big tables) |
 
 `mean`, `std`, `min`, `max` and `median` return one value per column as an Array, and `scale` takes
@@ -282,6 +308,10 @@ xTest = test scale(top)                          // the test rows by the same di
 Any Array of one divisor per column works, such as a scale you know in advance
 (`data scale([255, 100, 1])`). A column whose divisor is 0 is left as it is, which keeps columns
 that are always 0 (MNIST's border pixels) from failing.
+
+`pca` sums the covariance in C a chunk of rows at a time, so it needs no copy of the table:
+all of MNIST's 60,000 x 784 pixels take a few seconds. clay-plot's `embedding` and `pca` use it
+when given an AnnData.
 
 ## Speed
 
