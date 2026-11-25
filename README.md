@@ -327,7 +327,7 @@ second. The methods below return new tables, so they chain; `to` is exclusive an
 | `split(fraction)` | `[first, rest]`: `split(0.8)` is an 80% / 20% split (shuffle first) |
 | `mean`, `std` | the mean and standard deviation of each column, as Arrays |
 | `min`, `max`, `median` | the smallest, largest and middle value of each column, as Arrays (the median of an even number of rows is the mean of the middle two) |
-| `standardize` | every column shifted to mean 0 and scaled to standard deviation 1 |
+| `standardize`, `standardize(means, stds)` | every column shifted to mean 0 and scaled to standard deviation 1; with Arrays of one mean and one standard deviation per column, `(x - mean) / std` with those instead of the table's own (a std of 0 counts as 1), so the validation and test splits can use the training split's: `test standardize(train mean, train std)` |
 | `argmax` | a one-column table: the index of the largest value in each row |
 | `pca(k, maxRows)` | the first `k` principal components (2 by default): a Dict of `projected` (every row as `k` numbers), `components` (`k` unit vectors over the columns, most variance first), `explained` (the fraction of the variance each holds) and `mean`. Fitted on `maxRows` evenly spaced rows at most, or on all |
 | `toArray` | an Array of rows (boxes every value, so avoid on big tables) |

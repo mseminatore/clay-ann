@@ -189,6 +189,19 @@ check("std", ((t std) at(0)) > 1.11 && ((t std) at(0)) < 1.12)
 z = t standardize
 check("standardize centers", ((z mean) at(0)) < 0.0001 && ((z mean) at(0)) > -0.0001)
 check("constant column is only shifted", ((AnnData fromArray([[5, 1], [5, 2]])) standardize) toArray == [[0, -1], [0, 1]])
+// with given statistics: another table's, e.g. the training split's
+given = (AnnData fromArray([[3, 30], [5, 10]])) standardize([2, 20], [2, 10])
+check("standardize with given means and stds", given toArray == [[0.5, 1], [1.5, -1]])
+own = t standardize
+same = t standardize(t mean, t std)
+check("given its own statistics, the same as standardize",
+      ((0..3) toArray reduce(0) { |a, i| a + (((own row(i)) at(0)) - ((same row(i)) at(0))) abs }) < 0.0001)
+check("a std of 0 only shifts", ((AnnData fromArray([[5, 1]])) standardize([5, 0], [0, 0])) toArray == [[0, 1]])
+check("means without stds", (raises({ t standardize(t mean) })) == "ArgumentError")
+check("stds without means", (raises({ t standardize(nil, t std) })) == "ArgumentError")
+check("one per column", (raises({ t standardize([1], [1]) })) == "ArgumentError")
+check("numbers only", (raises({ t standardize([1, "x"], [1, 1]) })) == "ArgumentError")
+check("standardize leaves the table alone", (t row(0)) == [1, 10])
 parts = t split(0.75)
 check("split", (parts at(0)) rows == 3 && (parts at(1)) rows == 1 && ((parts at(1)) row(0)) == [4, 40])
 check("split fraction", (raises({ t split(1) })) == "ArgumentError")

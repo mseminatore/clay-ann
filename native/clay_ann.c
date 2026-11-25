@@ -3167,29 +3167,94 @@ static ClayPluginValue data_median(ClayPluginObject s, int c, ClayPluginValue *v
 }
 
 //---------------------------------------------------------------------------------
+// is v one number per column (cols of them)? Raises naming what it is if not (raise does
+// not return, so check before allocating)
+//---------------------------------------------------------------------------------
+static void check_column_values(ClayPluginValue v, int cols, const char *who, const char *what) {
+    int ok = api->is_array(v) && api->array_size(v) == (size_t)cols;
+
+    for (size_t c = 0; ok && c < (size_t)cols; c++) {
+        ClayPluginValue e = api->array_get(v, c);
+
+        ok = api->is_int(e) || api->is_float(e);
+    }
+
+    if (!ok) {
+        char msg[128];
+
+        snprintf(msg, sizeof(msg), "%s: %s must be an Array of one number per column (%d)", who, what, cols);
+
+        api->raise(msg, "ArgumentError");
+    }
+}
+
+//---------------------------------------------------------------------------------
 // data standardize -> a copy with each column shifted to mean 0 and scaled to standard
-// deviation 1 (a column that never varies is only shifted)
+// deviation 1 (a column that never varies is only shifted).
+// data standardize(means, stds) -> the same with the given statistics, one per column,
+// instead of the table's own: (x - mean) / std, a std of 0 counting as 1. Standardize
+// the validation and test splits with the training split's mean and std, so nothing
+// leaks in from them.
 //---------------------------------------------------------------------------------
 static ClayPluginValue data_standardize(ClayPluginObject self, int argc, ClayPluginValue *argv) {
-    CLAY_UNUSED(argc); CLAY_UNUSED(argv);
     PTensor t = self_tensor(self, "standardize");
+
     if (!t) return CLAY_NIL;
+
+    int given = argc > 0 && !api->is_nil(argv[0]);
+
+    if (given || (argc > 1 && !api->is_nil(argv[1]))) {
+        if (!given || argc < 2 || api->is_nil(argv[1])) {
+            api->raise("standardize takes both means and stds, or neither", "ArgumentError");
+
+            return CLAY_NIL;
+        }
+
+        check_column_values(argv[0], t->cols, "standardize", "means");
+        check_column_values(argv[1], t->cols, "standardize", "stds");
+    }
+
     PTensor r = tensor_copy(t);
     double *mean = (double *)malloc((size_t)t->cols * sizeof(double));
     double *sd = (double *)malloc((size_t)t->cols * sizeof(double));
+
     if (!r || !mean || !sd) {
         if (r) tensor_free(r);
-        free(mean); free(sd);
+
+        free(mean);
+        free(sd);
         api->raise("ann: out of memory", "RuntimeError");
+
         return CLAY_NIL;
     }
-    column_stats(t, mean, sd);
-    for (int i = 0; i < r->rows; i++)
-        for (int c = 0; c < r->cols; c++) {
-            real *v = &r->values[(size_t)i * r->cols + c];
-            *v = (real)((*v - mean[c]) / (sd[c] > 0 ? sd[c] : 1));
+
+    if (given) {
+        for (int c = 0; c < t->cols; c++) {
+            mean[c] = api->to_float(api->array_get(argv[0], (size_t)c));
+            sd[c] = api->to_float(api->array_get(argv[1], (size_t)c));
         }
-    free(mean); free(sd);
+
+        // in double, rounded once, as Clay computes (x - mean) / std
+        for (int i = 0; i < r->rows; i++) {
+            real *row = r->values + (size_t)i * r->cols;
+
+            for (int c = 0; c < r->cols; c++)
+                row[c] = (real)(((double)row[c] - mean[c]) / (sd[c] != 0 ? sd[c] : 1));
+        }
+    } else {
+        column_stats(t, mean, sd);
+
+        for (int i = 0; i < r->rows; i++)
+            for (int c = 0; c < r->cols; c++) {
+                real *v = &r->values[(size_t)i * r->cols + c];
+
+                *v = (real)((*v - mean[c]) / (sd[c] > 0 ? sd[c] : 1));
+            }
+    }
+
+    free(mean);
+    free(sd);
+
     return data_wrap(r);
 }
 
