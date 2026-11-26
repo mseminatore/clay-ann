@@ -1,0 +1,137 @@
+// Text classification: a tokenizer, an embedding and 1-D convolutions on short reviews
+//
+// Each synthetic review mentions three things, each with a sentiment word that may be
+// negated: "the plot was not good, the acting was dull and the music was great". Its label
+// is what most of them say, so "not" matters, but only for the word right after it. The
+// data is made here, so nothing is downloaded. (A Clay port of pyann's
+// examples/text_classification.py.)
+//
+// Two networks learn the same reviews:
+//   - a dense network on word counts (bag of words), which sees that "not" occurs but not
+//     which word it negates
+//   - embedding + conv1d + global max pooling, whose filters read short phrases such as
+//     "not good" wherever they occur
+//
+// Ann tokenizer turns the texts into ids and encodePadded into rows of 32 ids; the embedding
+// masks the padding, so it never counts. The network is then saved with its tokenizer and
+// reloaded.
+//
+//   clay bricks/ann/examples/text_classification.clay [--epochs N] [--samples N]
+import("ann")
+
+epochs = 15
+samples = 3000
+args = System args
+i = 0
+{ i < args size } whileTrue {
+    (args at(i) == "--epochs") ifTrue { i = i + 1; epochs = (args at(i)) toInt }
+    (args at(i) == "--samples") ifTrue { i = i + 1; samples = (args at(i)) toInt }
+    i = i + 1
+}
+
+topics = ["plot", "acting", "music", "story", "ending", "cast", "dialogue", "pacing"]
+positive = ["good", "great", "fun", "lovely", "moving", "clever", "superb", "charming"]
+negative = ["bad", "dull", "awful", "boring", "weak", "clumsy", "silly", "tedious"]
+filler = ["really", "quite", "so", "very", "just", "honestly"]
+maxLen = 32
+
+// a seeded random number generator, so runs repeat: next value is in [0, 1)
+rng = Object clone { state = 3 }
+rng setMethod("next", { self state = (self state * 48271) % 2147483647; self state / 2147483647.0 })
+rng setMethod("pick", { |items| items at(Math floor((self next) * items size)) })
+
+// count reviews: [texts, labels] with labels 1 (positive) or 0 (negative)
+makeReviews = { |count|
+    texts = []
+    labels = []
+    { texts size < count } whileTrue {
+        votes = 0
+        clauses = []
+        used = []
+        { clauses size < 3 } whileTrue {
+            topic = rng pick(topics)
+            (used contains(topic)) ifFalse {
+                used push(topic)
+                good = (rng next) < 0.5
+                negated = (rng next) < 0.4
+                word = rng pick((good != negated) ifTrue { positive } ifFalse { negative })
+                // the vote is what the clause says: "not bad" is positive
+                votes = votes + (good ifTrue { 1 } ifFalse { -1 })
+                clause = "the " + topic + " was"
+                ((rng next) < 0.4) ifTrue { clause = clause + " " + rng pick(filler) }
+                clause = clause + (negated ifTrue { " not " } ifFalse { " " }) + word
+                clauses push(clause)
+            }
+        }
+        texts push((clauses at(0)) + ", " + (clauses at(1)) + " and " + (clauses at(2)))
+        labels push((votes > 0) ifTrue { 1 } ifFalse { 0 })
+    }
+    [texts, labels]
+}
+
+train = makeReviews value(samples)
+test = makeReviews value(1000)
+trainTexts = train at(0)
+testTexts = test at(0)
+yTrain = (AnnData fromArray((train at(1)) map { |k| [k] })) oneHot(2)
+yTest = (AnnData fromArray((test at(1)) map { |k| [k] })) oneHot(2)
+first = (((train at(1)) at(0)) == 1) ifTrue { "positive" } ifFalse { "negative" }
+(trainTexts size toString + " training and " + testTexts size toString + " test reviews, e.g. \"" +
+    (trainTexts at(0)) + "\" (" + first + ")\n") println
+
+// word ids: 0 pads, 1 stands for words the training texts never had
+tok = Ann tokenizer(#{"oovToken": "<unk>"})
+tok fit(trainTexts)
+xTrain = tok encodePadded(trainTexts, maxLen)
+xTest = tok encodePadded(testTexts, maxLen)
+vocab = tok vocabSize
+("Vocabulary: " + vocab toString + " ids; each review is " + maxLen toString + " ids, padded with 0 at the end\n") println
+
+// word counts per review (padding left out), for the bag-of-words network
+bagOfWords = { |texts|
+    (tok encode(texts)) map { |seq|
+        counts = (1..vocab) map { |k| 0 }
+        seq each { |id| counts setAt(id, (counts at(id)) + 1) }
+        counts
+    }
+}
+bowTrain = AnnData fromArray(bagOfWords value(trainTexts))
+bowTest = AnnData fromArray(bagOfWords value(testTexts))
+
+Ann seed(3)
+mlp = Ann network(#{"loss": "cross_entropy", "learningRate": 0.003, "quiet": true})
+mlp input(vocab) dense(64, "relu") dense(32, "relu") output(2, "softmax")
+mlp fit(bowTrain, yTrain, #{"epochs": epochs, "batchSize": 32})
+("  bag-of-words MLP: " + ((mlp accuracy(bowTest, yTest)) * 100) toInt toString + "% test accuracy") println
+
+cnn = Ann network(#{"loss": "cross_entropy", "learningRate": 0.005, "quiet": true})
+cnn input(maxLen)
+cnn embedding(vocab, 16, 0, true)          // -> 16 x 32: a vector per word
+cnn conv1d(32, 3, "relu", 1, "same")       // -> 32 x 32: 3-word phrases
+cnn conv1d(32, 3, "relu", 1, "same")       // -> 32 x 32: their neighbours
+cnn globalMaxPool                          // -> 32: wherever they occur
+cnn output(2, "softmax")
+cnn fit(xTrain, yTrain, #{"epochs": epochs, "batchSize": 32})
+accuracy = cnn accuracy(xTest, yTest)
+("embedding + conv1d: " + (accuracy * 100) toInt toString + "% test accuracy\n") println
+cnn summary println
+"" println
+
+reviews = ["the plot was not bad, the acting was great and the music was not good",
+           "the plot was not bad, the acting was not great and the music was not good",
+           "the ending was clever, the cast was superb and the pacing was very tedious"]
+probs = cnn predictBatch(tok encodePadded(reviews, maxLen))
+(0..(reviews size - 1)) each { |k|
+    (((probs row(k)) at(1) * 100) toInt toString + "% positive: \"" + (reviews at(k)) + "\"") println
+}
+
+// keep the tokenizer with the network, so new texts get the same ids
+dir = File tempDir
+cnn saveBinary(dir + "/reviews.nnb")
+tok save(dir + "/reviews_tokenizer.json")
+back = Ann loadBinary(dir + "/reviews.nnb")
+tokBack = Ann loadTokenizer(dir + "/reviews_tokenizer.json")
+again = back accuracy(tokBack encodePadded(testTexts, maxLen), yTest)
+("\nReloaded network and tokenizer: " + (again * 100) toInt toString + "% (was " + (accuracy * 100) toInt toString + "%)") println
+File delete(dir + "/reviews.nnb")
+File delete(dir + "/reviews_tokenizer.json")

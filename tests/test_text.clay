@@ -1,0 +1,173 @@
+// tests for the ann brick's text support (Ann tokenizer and friends). Run them from the
+// brick's directory:
+//   clay tests/test_text.clay
+// The expected ids follow pyann's Tokenizer (pyann/text.py), which this mirrors.
+import("ann")
+
+failures = 0
+check = { |what, ok|
+    ok ifFalse { ("FAIL: " + what) println; failures = failures + 1 }
+}
+raises = { |block| try { block value; "no error" } catch { |e| e type } }
+
+// ids by frequency, ties in the order first seen; 0 pads, the oov token is 1
+tok = Ann tokenizer(#{"oovToken": "<unk>"})
+check("fit returns the tokenizer", (tok fit(["The cat sat on the mat.", "The dog ate my homework!"])) == tok)
+check("word index", tok wordIndex == #{"<unk>": 1, "the": 2, "cat": 3, "sat": 4, "on": 5, "mat": 6, "dog": 7,
+                                        "ate": 8, "my": 9, "homework": 10})
+check("word counts in the order seen", (tok wordCounts) keys == ["the", "cat", "sat", "on", "mat", "dog", "ate", "my", "homework"] &&
+      (tok wordCounts) get("the") == 3)
+check("vocabSize counts padding", tok vocabSize == 11)
+check("encode: unknown words are the oov id", tok encode(["the cat ate a fish", ""]) == [[2, 3, 8, 1, 1], []])
+// id looks a word up as it is (no lower-casing): "CAT" is unknown
+check("word and id", tok word(3) == "cat" && tok word(0) == nil && tok word(99) == nil && tok id("CAT") == 1 &&
+      tok id("cat") == 3 && tok id("zebra") == 1)
+check("decode leaves padding out", tok decode([[2, 3, 0, 0], [7, 99, 1]]) == ["the cat", "dog <unk>"])
+check("tokenize", tok tokenize("Hello, World! It's") == ["hello", "world", "it's"])
+
+// fitting again adds to the counts
+tok fit(["cat cat cat"])
+check("refit counts everything so far", tok word(2) == "cat" && tok word(3) == "the" && (tok wordCounts) get("cat") == 4)
+
+// encodePadded: an AnnData of ids, padded (and cut) at the end by default
+tok = Ann tokenizer
+tok fit(["a b c d e", "a b", "a"])
+x = tok encodePadded(["a b c d e", "b a"], 3)
+check("encodePadded is an AnnData", x rows == 2 && x cols == 3)
+check("post padding and truncating", x toArray == [[1, 2, 3], [2, 1, 0]])
+check("pre padding and truncating", (tok encodePadded(["a b c d e", "b a"], 3, "pre", "pre")) toArray == [[3, 4, 5], [0, 2, 1]])
+check("maxlen defaults to the longest", (tok encodePadded(["a", "a b c"])) cols == 3)
+check("padSequences", (Ann padSequences([[1, 2, 3], [4]], 2)) toArray == [[1, 2], [4, 0]] &&
+      (Ann padSequences([[1, 2, 3], [4]], 4, "pre", "post", 9)) toArray == [[9, 1, 2, 3], [9, 9, 9, 4]] &&
+      (Ann padSequences([[1], [2, 3]])) cols == 2)
+check("decode an AnnData", tok decode(x) == ["a b c", "b a"])
+
+// numWords keeps the ids below it; the rest become the oov id
+small = Ann tokenizer(#{"numWords": 3, "oovToken": "?"})
+small fit(["x x x y y z"])
+check("numWords", small encode(["x y z"]) == [[2, 1, 1]] && small vocabSize == 3 && small word(3) == nil)
+check("wordIndex keeps every word", (small wordIndex) size == 4)
+noOov = Ann tokenizer(#{"numWords": 2})
+noOov fit(["x x y"])
+check("without an oov token unknown words go", noOov encode(["x y q x"]) == [[1, 1]])
+
+// settings
+chars = Ann tokenizer(#{"charLevel": true})
+chars fit(["abca"])
+check("charLevel", chars encode(["cab"]) == [[3, 1, 2]] && chars decode([[3, 1, 2]]) == ["cab"])
+check("charLevel counts code points", (chars tokenize("é!")) == ["é", "!"])
+cased = Ann tokenizer(#{"lower": false, "filters": "", "split": ","})
+check("lower, filters and split", cased tokenize("A b,,C!") == ["A b", "C!"])
+check("Unicode lower case", (Ann tokenizer) tokenize("ÉCOLE Straße ΑΘΗΝΑ МОСКВА") == ["école", "straße", "αθηνα", "москва"])
+check("Unicode whitespace", (Ann tokenizer) tokenize("a" + String fromBytes([194, 160]) + "b") == ["a", "b"])
+
+// preprocess steps
+check("stripHtml", Ann stripHtml("a<br />b &amp; c &copy &#39;q&#x27; <!-- x --><script>bad()</script>end 3 < 4") ==
+      "a b & c © 'q'   end 3 < 4")
+check("splitContractions", Ann splitContractions("I don't think it's 'quoted', you're ok") ==
+      "I do n't think it 's  quoted , you 're ok")
+html = Ann tokenizer(#{"preprocess": "stripHtml"})
+check("preprocess by name", html tokenize("<p>Good &amp; fun</p>") == ["good", "fun"])
+both = Ann tokenizer(#{"preprocess": ["stripHtml", "splitContractions"]})
+check("preprocess steps in order", both tokenize("<i>Don't</i> stop") == ["do", "n't", "stop"])
+mine = Ann tokenizer(#{"preprocess": ["stripHtml", { |s| s replace("cat", "kitten") }]})
+mine fit(["<b>a cat</b>"])
+check("a Block of your own", mine wordIndex == #{"a": 1, "kitten": 2} && mine encode(["cat"]) == [[2]] &&
+      mine tokenize("<b>cat</b>") == ["kitten"])
+check("settings", (both settings) get("preprocess") == ["stripHtml", "splitContractions"] &&
+      (mine settings) get("preprocess") == "custom" && (tok settings) get("numWords") == nil)
+
+// saving: pyann's JSON format, both ways
+tok = Ann tokenizer(#{"numWords": 50, "oovToken": "<unk>", "preprocess": "stripHtml"})
+tok fit(["Café <b>au</b> lait", "the café"])
+back = Ann tokenizerFromJson(tok toJson)
+check("toJson round trip", back toJson == tok toJson && back encode(["café lait x"]) == tok encode(["café lait x"]))
+check("toJson escapes as Python", (tok toJson) contains("\"caf\\u00e9\": 2") && (tok toJson) contains("\"preprocess\": \"strip_html\""))
+path = File tempDir + "/ann_test_tokenizer.json"
+tok save(path)
+check("save and loadTokenizer", (Ann loadTokenizer(path)) toJson == tok toJson)
+File delete(path)
+// a tokenizer pyann saved: Tokenizer(num_words=6, oov_token="<unk>", preprocess=[strip_html,
+// split_contractions]) fitted on ["Don't <b>stop</b> the café", "the CAFÉ is it's &amp; the end"]
+pyJson = "{\"num_words\": 6, \"oov_token\": \"<unk>\", \"lower\": true, \"filters\": \"!\\\"#$%&()*+,-./:;<=>?@[\\\\]^_`{|}~\\t\\n\", \"split\": null, \"char_level\": false, \"preprocess\": [\"strip_html\", \"split_contractions\"], \"word_counts\": {\"do\": 1, \"n't\": 1, \"stop\": 1, \"the\": 3, \"caf\\u00e9\": 2, \"is\": 1, \"it\": 1, \"'s\": 1, \"end\": 1}, \"word_index\": {\"<unk>\": 1, \"the\": 2, \"caf\\u00e9\": 3, \"do\": 4, \"n't\": 5, \"stop\": 6, \"is\": 7, \"it\": 8, \"'s\": 9, \"end\": 10}}"
+py = Ann tokenizerFromJson(pyJson)
+check("loads pyann's JSON", py encode(["The café isn't open, it's the END"]) == [[2, 3, 1, 5, 1, 1, 1, 2, 1]])
+check("and writes it back the same", py toJson == pyJson)
+
+// pre-trained word vectors
+vecPath = File tempDir + "/ann_test_vectors.txt"
+File write(vecPath, "the 0.5 0.25 1\ncat 1 2 3\nthe 9 9 9\nnew york 5 5 5 5\nmat -1 -2.5 3e-1\n<unk> 7 7 7\n")
+tok = Ann tokenizer(#{"oovToken": "<unk>"})
+tok fit(["the cat sat on the mat", "the dog"])
+v = Ann loadWordVectors(vecPath, tok)
+rows = (v get("vectors")) toArray
+check("word vectors: a row per id", rows size == tok vocabSize && (rows at(0)) size == 3)
+check("found counts the words with vectors", (v get("found")) == 3)
+check("rows by id, the first match winning", (rows at(tok id("the"))) == [0.5, 0.25, 1] && (rows at(tok id("cat"))) == [1, 2, 3] &&
+      (rows at(tok id("mat"))) at(1) == -2.5)
+check("padding, oov and missing words are zeros", (rows at(0)) == [0, 0, 0] && (rows at(1)) == [0, 0, 0] &&
+      (rows at(tok id("dog"))) == [0, 0, 0])
+r = (Ann loadWordVectors(vecPath, tok, #{"missing": "random", "seed": 1})) get("vectors")
+check("missing random", ((r row(tok id("dog"))) at(0)) != 0 && (r row(0)) == [0, 0, 0] && (r row(tok id("cat"))) == [1, 2, 3])
+File write(vecPath, "3 2\ncat 1 1\ndog 2 2\nsat 3 3\n")
+w = Ann loadWordVectors(vecPath, #{"cat": 1, "dog": 2, "zzz": 4})
+check("word2vec header and a Dict of ids", (w get("found")) == 2 && ((w get("vectors")) toArray) == [[0, 0], [1, 1], [2, 2], [0, 0], [0, 0]])
+check("dim mismatch", (raises({ Ann loadWordVectors(vecPath, tok, #{"dim": 5}) })) == "ArgumentError")
+File write(vecPath, "cat 1 2 3\ndog 1 2\n")
+check("short vector", (raises({ Ann loadWordVectors(vecPath, tok) })) == "ArgumentError")
+File delete(vecPath)
+check("gzip files", (raises({ Ann loadWordVectors("glove.txt.gz", tok) })) == "ArgumentError")
+check("missing vector file", (raises({ Ann loadWordVectors("/no/such/vectors.txt", tok) })) == "RuntimeError")
+
+// pre-trained vectors go into a (frozen) embedding
+emb = Ann network(#{"quiet": true}) input(4) embedding(tok vocabSize, 3, 0, true) flatten output(1, "sigmoid")
+emb setWeights(1, v get("vectors"))
+emb freeze(1)
+check("vectors in an embedding", ((emb weights(1)) at(tok id("cat"))) == [1, 2, 3])
+
+// a network learns from tokenizer output: is "not" right before "good"?
+texts = []
+labels = []
+k = 0
+words = ["good", "film", "plot", "fun", "cast"]
+{ k < 60 } whileTrue {
+    w1 = words at(k % 5)
+    w2 = words at((k * 3 + 1) % 5)
+    neg = (k % 2) == 0
+    texts push((neg ifTrue { "not good " } ifFalse { "good not " }) + w1 + " " + w2)
+    labels push([neg ifTrue { 1 } ifFalse { 0 }])
+    k = k + 1
+}
+tt = Ann tokenizer
+tt fit(texts)
+tx = tt encodePadded(texts, 6)
+ty = (AnnData fromArray(labels)) oneHot(2)
+best = 0
+trySeed = 1
+{ best < 0.95 && trySeed <= 6 } whileTrue {
+    Ann seed(trySeed)
+    tn = Ann network(#{"loss": "cross_entropy", "learningRate": 0.02, "epochs": 120, "batchSize": 8, "quiet": true})
+    tn input(6) embedding(tt vocabSize, 4, 0, true) conv1d(6, 2, "relu") globalMaxPool output(2, "softmax")
+    tn train(tx, ty)
+    best = tn accuracy(tx, ty)
+    trySeed = trySeed + 1
+}
+check("a text network learns from encodePadded", best >= 0.95)
+
+// mistakes are Clay errors
+fresh = Ann tokenizer
+check("fit takes an Array", (raises({ fresh fit("one text") })) == "TypeError")
+check("texts must be Strings", (raises({ fresh fit(["a", 3]) })) == "TypeError")
+check("encode before fit", (raises({ fresh encode(["a"]) })) == "RuntimeError")
+check("unknown step", (raises({ Ann tokenizer(#{"preprocess": "stem"}) })) == "ArgumentError")
+check("bad numWords", (raises({ Ann tokenizer(#{"numWords": 0}) })) == "ArgumentError")
+check("empty split", (raises({ Ann tokenizer(#{"split": ""}) })) == "ArgumentError")
+check("bad padding", (raises({ tok encodePadded(["the"], 3, "middle") })) == "ArgumentError")
+check("bad maxlen", (raises({ Ann padSequences([[1]], 0) })) == "ArgumentError")
+check("all empty", (raises({ Ann padSequences([[], []]) })) == "ArgumentError")
+check("non-number ids", (raises({ Ann padSequences([[1, "x"]]) })) == "TypeError")
+check("not JSON", (raises({ Ann tokenizerFromJson("{nope") })) == "ArgumentError")
+check("not a tokenizer's JSON", (raises({ Ann tokenizerFromJson("{\"a\": 1}") })) == "ArgumentError")
+
+(failures > 0) ifTrue { (failures toString + " failed") println; System exit(1) }
+"ann text: all tests passed" println
