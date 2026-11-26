@@ -20,6 +20,9 @@
 //---------------------------------------------------------------------------------
 static const ClayPluginAPI *api;
 
+// clay_text.c: the AnnTokenizer prototype
+void ann_text_init(const ClayPluginAPI *clay_api, ClayPluginObject annData);
+
 //---------------------------------------------------------------------------------
 // --- helpers ------------------------------------------------------------
 //---------------------------------------------------------------------------------
@@ -3795,6 +3798,9 @@ CLAY_PLUGIN_EXPORT void ann_plugin_init(const ClayPluginAPI *clay_api) {
     ClayPluginType data_def = { "AnnData", data_methods, data_free, sizeof(void *) };
     data_proto = api->register_type(&data_def);
     api->set_slot(data_proto, "_annData", api->make_bool(1));
+
+    // register the AnnTokenizer prototype (text to token ids)
+    ann_text_init(api, data_proto);
 
     // register the AnnQuant prototype
     ClayPluginType quant_def = { "AnnQuant", quant_methods, quant_free, sizeof(void *) };

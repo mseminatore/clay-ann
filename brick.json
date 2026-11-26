@@ -1,6 +1,6 @@
 {
   "name": "ann",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "clay": ">=0.3.3",
   "description": "Neural networks for Clay: a native brick over libann",
   "main": "src/main.clay",
@@ -9,6 +9,7 @@
     "plugin": "ann",
     "sources": [
       "native/clay_ann.c",
+      "native/clay_text.c",
       "native/libann/ann.c",
       "native/libann/tensor.c",
       "native/libann/ann_hypertune.c",

@@ -191,6 +191,117 @@ Ann = Object clone {
         }
     }
 
+    // --- text: token ids for an embedding layer (pyann's pyann.text, in C) ---------------
+
+    // A new tokenizer, which builds a vocabulary from texts and turns texts into token ids.
+    // Id 0 is left for padding (so embedding(..., 0, true) can mask it); with an oovToken,
+    // id 1 stands for words outside the vocabulary. Options (all optional):
+    //   numWords: keep only the ids below this (the most frequent words); nil keeps all
+    //   oovToken: the word standing for unknown ones, as id 1; nil drops unknown words
+    //   lower: lower-case texts first (default true)
+    //   filters: characters turned into spaces before splitting (default: ASCII
+    //     punctuation but the apostrophe, and tab and newline, as Keras and pyann)
+    //   split: the word separator (default nil: any whitespace)
+    //   charLevel: make each character a token (default false)
+    //   preprocess: what is done to each text first: "stripHtml", "splitContractions", a
+    //     Block of your own (a String in, a String out), or an Array of them, in order
+    //   tok = Ann tokenizer(#{"numWords": 10000, "oovToken": "<unk>", "preprocess": "stripHtml"})
+    //   tok fit(texts)
+    //   x = tok encodePadded(texts, 200)              // an AnnData: a row of 200 ids per text
+    tokenizer(options = nil) {
+        o = options ?? #{}
+        pre = Ann _steps(o get("preprocess"))
+        tok = AnnTokenizer create(o get("numWords"), o get("oovToken"), o get("lower"), o get("filters"),
+                                  o get("split"), o get("charLevel"), pre at(0), pre at(1))
+        Ann _keepSteps(tok, pre at(0))
+    }
+
+    // A tokenizer saved with tok save(path) (or pyann's Tokenizer.to_json). Its preprocess
+    // steps come back by name; pass preprocess when it had Blocks of your own.
+    loadTokenizer(path, preprocess = nil) { Ann tokenizerFromJson(File read(path), preprocess) }
+
+    // The same from the JSON text itself (tok toJson)
+    tokenizerFromJson(json, preprocess = nil) {
+        pre = Ann _steps(preprocess)
+        tok = AnnTokenizer fromJson(json, pre at(0), pre at(1))
+        (tok hasSlot("_lostPreprocess")) ifTrue {
+            "warning: this tokenizer was saved with preprocess Blocks of your own: pass them to loadTokenizer(path, preprocess) to clean texts as before" println
+        }
+        Ann _keepSteps(tok, pre at(0))
+    }
+
+    // Sequences of ids (Arrays, ragged) as an AnnData with a row of maxlen ids each: shorter
+    // ones padded with value, longer ones cut. padding and truncating: "post" (at the end,
+    // the default) or "pre". maxlen nil is the longest sequence's length. Padding at the end
+    // gives a masked embedding exactly what the unpadded text would.
+    padSequences(sequences, maxlen = nil, padding = "post", truncating = "post", value = 0) {
+        AnnTokenizer padSequences(sequences, maxlen, padding, truncating, value)
+    }
+
+    // A text without its HTML: tags become spaces, comments, scripts and styles go, and
+    // entities are decoded ("&amp;" to "&"). Without it "<br />" becomes the word "br".
+    stripHtml(text) { AnnTokenizer stripHtml(text) }
+
+    // Contractions split as GloVe's and word2vec's text was: "don't" -> "do n't", "it's" ->
+    // "it 's" (also 're, 've, 'll, 'd, 'm); quotes at a word's start or end go
+    splitContractions(text) { AnnTokenizer splitContractions(text) }
+
+    // An embedding's starting vectors from a pre-trained word vector file (GloVe's text
+    // format, or word2vec's / fastText's with their "count dim" first line; not gzipped).
+    // source is a fitted tokenizer or a Dict of word -> id. Returns a Dict: vectors (an
+    // AnnData, row i the vector of the word with id i) and found (how many of the words had
+    // one). Options: vocabSize (rows; default the tokenizer's vocabSize, or the Dict's
+    // largest id + 1), dim (checked; default the file's), missing ("zeros", or "random":
+    // normal with the found vectors' mean and spread), seed (for random), paddingId (the
+    // row kept zero, default 0; nil for none).
+    //   v = Ann loadWordVectors("glove.6B.100d.txt", tok)
+    //   net embedding(tok vocabSize, 100, 0, true) ...
+    //   net setWeights(1, v get("vectors")) freeze(1)
+    loadWordVectors(path, source, options = nil) {
+        o = options ?? #{}
+        pad = (o has("paddingId")) ifTrue { o get("paddingId") } ifFalse { 0 }
+        r = AnnTokenizer _wordVectors(path, source, o get("vocabSize"), o get("dim"), o get("missing"),
+                                      o get("seed"), pad)
+        #{"vectors": r at(0), "found": r at(1)}
+    }
+
+    // preprocess as [an Array of steps or nil, whether it was one step]
+    _steps(pre) {
+        (pre == nil) ifTrue { return [nil, false] }
+        (pre type == "Array") ifTrue { return [pre, false] }
+        [[pre], true]
+    }
+
+    // a tokenizer with Blocks among its steps keeps them: Clay applies its steps then
+    _keepSteps(tok, steps) {
+        (steps != nil && (steps find { |s| s type != "String" }) != nil) ifTrue { tok setSlot("_steps", steps) }
+        tok
+    }
+
+    // texts after a tokenizer's steps, when Clay applies them (else the texts as they are)
+    _prep(tok, texts) {
+        ((tok hasSlot("_steps")) && (texts type == "Array")) ifFalse { return texts }
+        steps = tok getSlot("_steps")
+        texts map { |t| Ann _applySteps(steps, t) }
+    }
+
+    _prepOne(tok, text) {
+        (tok hasSlot("_steps")) ifFalse { return text }
+        Ann _applySteps(tok getSlot("_steps"), text)
+    }
+
+    _applySteps(steps, text) {
+        t = text
+        steps each { |s|
+            (t type == "String") ifTrue {
+                (s type == "String") ifTrue {
+                    t = (s == "stripHtml" || s == "strip_html") ifTrue { AnnTokenizer stripHtml(t) } ifFalse { AnnTokenizer splitContractions(t) }
+                } ifFalse { t = s value(t) }
+            }
+        }
+        t
+    }
+
     // The bodies of AnnNet's fit, layers and summary (below). They are methods here because a
     // method's variables are its own, while a top-level block's assignments would write the
     // caller's top-level variables of the same names (epochs, loss, history, ...).
@@ -322,3 +433,25 @@ AnnNet setMethod("summary", { Ann _summary(self) })
 // columns, the most variance first), explained (the fraction of the variance each holds) and
 // mean (each column's). Fitted on maxRows rows at most (evenly spaced), or on all of them.
 AnnData setMethod("pca", { |k, maxRows| Ann _pca(self, k, maxRows) })
+
+// Tokenizers (Ann tokenizer) are AnnTokenizer objects, written in C (native/clay_text.c):
+//   tok fit(texts)            count the words of texts (an Array of Strings) and (re)build the
+//                             vocabulary from all counts so far -> tok
+//   tok encode(texts)         -> each text as an Array of token ids (unknown words become the
+//                             oovToken's id, or are dropped without one)
+//   tok encodePadded(texts, maxlen, padding, truncating) -> an AnnData: encode, then pad or cut
+//                             each to maxlen ids (see Ann padSequences) - ready for train
+//   tok tokenize(text)        -> a text's tokens (Strings), before they become ids
+//   tok decode(sequences)     -> ids back to texts (Arrays of ids, or an AnnData of them)
+//   tok vocabSize             ids the sequences can hold, padding included: embedding's vocabulary
+//   tok wordIndex, wordCounts Dicts of word -> id (every word seen) and word -> count
+//   tok word(id), tok id(word), tok settings
+//   tok toJson, tok save(path) pyann's format: keep it with the network so new texts get the
+//                             same ids (Ann loadTokenizer(path))
+AnnTokenizer setMethod("fit", { |texts| self _fit(Ann _prep(self, texts)) })
+AnnTokenizer setMethod("encode", { |texts| self _encode(Ann _prep(self, texts)) })
+AnnTokenizer setMethod("encodePadded", { |texts, maxlen, padding, truncating|
+    self _encodePadded(Ann _prep(self, texts), maxlen, padding, truncating)
+})
+AnnTokenizer setMethod("tokenize", { |text| self _tokenize(Ann _prepOne(self, text)) })
+AnnTokenizer setMethod("save", { |path| File write(path, self toJson); self })

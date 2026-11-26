@@ -119,7 +119,8 @@ instead of random ones. A wrong shape raises `ArgumentError`, and nothing change
 `net freeze(i)` keeps layer `i`'s weights and biases as they are while the rest of the network
 trains (gradients still pass through it to the layers below), and `net unfreeze(i)` lets it train
 again. Both return the network. Saves keep frozen layers frozen. Together they fine-tune a
-trained network, or keep pre-trained embedding vectors fixed:
+trained network, or keep pre-trained embedding vectors fixed (see
+[Pre-trained word vectors](#pre-trained-word-vectors) for vectors from a GloVe file):
 
 ```clay norun
 vectors = Ann loadCsv("glove_50d.csv")         // one row of 50 numbers per token id
@@ -147,6 +148,95 @@ maps = net activations([image], 1)             // one image's first conv feature
 Everything else works on these networks as before: `train`, `fit`, `predictBatch`, `save`,
 `quantize` and the exports. Mistakes (a convolution with no input layer, a window bigger than its
 input, a `reshape` that changes the size) raise `ArgumentError`.
+
+## Text: `Ann tokenizer`
+
+An embedding reads token ids. `Ann tokenizer` makes them from texts: it builds a vocabulary
+(the most frequent words first) and turns each text into ids, and `encodePadded` makes them
+rows of one length, as an AnnData ready for `train` or `fit`. Id 0 is left for padding, so the
+embedding can mask it; with an `oovToken`, id 1 stands for words outside the vocabulary.
+
+```clay norun
+tok = Ann tokenizer(#{"numWords": 10000, "oovToken": "<unk>", "preprocess": "stripHtml"})
+tok fit(trainTexts)                              // an Array of Strings
+x = tok encodePadded(trainTexts, 200)            // an AnnData: 200 ids per text, 0-padded at the end
+
+net = Ann network(#{"loss": "cross_entropy", "quiet": true})
+net input(200) embedding(tok vocabSize, 64, 0, true)
+net conv1d(64, 5, "relu") globalMaxPool output(2, "softmax")
+net fit(x, y, #{"epochs": 5})
+
+tok save("tokenizer.json")                       // keep it with the network: new texts need the same ids
+```
+
+It is a port of [pyann](https://github.com/mseminatore/pyann)'s `Tokenizer`, written in C:
+the same settings give the same ids, and the saved JSON is pyann's format, so a tokenizer
+saved by either loads in the other. It is fast. Fitting and encoding 50,000 IMDB-sized reviews
+(11 million words, with `stripHtml`) takes under a second.
+
+`Ann tokenizer(options)` options (all optional):
+
+| option | default | |
+|---|---|---|
+| `numWords` | `nil` | keep only the ids below this (the most frequent words); the rest become the oov id |
+| `oovToken` | `nil` | the word standing for unknown ones, as id 1; without one they are dropped |
+| `lower` | `true` | lower-case texts first |
+| `filters` | ASCII punctuation but `'`, tab, newline | characters turned into spaces before splitting |
+| `split` | `nil` | the word separator; `nil` splits on any whitespace |
+| `charLevel` | `false` | make each character a token |
+| `preprocess` | `nil` | `"stripHtml"`, `"splitContractions"`, a Block of your own (a String in, a String out), or an Array of them, applied in order |
+
+| method | |
+|---|---|
+| `tok fit(texts)` | count the words of texts and (re)build the vocabulary from all counts so far |
+| `tok encode(texts)` | each text as an Array of ids |
+| `tok encodePadded(texts, maxlen, padding, truncating)` | an AnnData, a row of `maxlen` ids per text (`maxlen` defaults to the longest) |
+| `tok tokenize(text)` | a text's tokens (Strings), before they become ids |
+| `tok decode(sequences)` | ids (Arrays, or an AnnData) back to texts, padding left out |
+| `tok vocabSize` | the ids the rows can hold, padding included: the embedding's vocabulary |
+| `tok wordIndex`, `tok wordCounts` | Dicts of word to id (every word seen) and word to count |
+| `tok word(id)`, `tok id(word)` | one word's id (looked up as given), or an id's word |
+| `tok toJson`, `tok save(path)` | the settings and vocabulary as JSON; `Ann loadTokenizer(path)` and `Ann tokenizerFromJson(json)` read it |
+
+`Ann padSequences(sequences, maxlen, padding, truncating, value)` pads Arrays of ids you made
+yourself the same way. `padding` and `truncating` are `"post"` (the default) or `"pre"`.
+Padding goes at the end by default, unlike Keras: with a masked embedding, a text padded at the
+end gives exactly what it would unpadded, even through strided layers.
+
+Scraped text needs cleaning. `Ann stripHtml(text)` turns tags into spaces, removes comments,
+scripts and styles, and decodes entities (`&amp;` to `&`). Without it, `<br />` becomes the word
+"br". `Ann splitContractions(text)` splits contractions the way GloVe's and word2vec's training
+text was split (`don't` to `do n't`, `it's` to `it 's`). Both work as `preprocess` steps by name.
+A tokenizer whose `preprocess` includes Blocks saves `"custom"`; give the Blocks to
+`loadTokenizer(path, preprocess)` again.
+
+Texts are UTF-8. Character tokens, filters and whitespace work on Unicode characters, as
+Python's do. Lower-casing covers ASCII, Latin-1, Latin Extended-A, Greek and Cyrillic letters
+(Python's covers every script). `stripHtml` decodes numeric entities and HTML 4's named ones,
+not all 2,231 of HTML5's.
+
+### Pre-trained word vectors
+
+`Ann loadWordVectors(path, tok, options)` reads GloVe's text format, or word2vec's and fastText's
+(with their `count dim` first line), and gives a Dict: `vectors`, an AnnData whose row *i* is the
+vector of the word with id *i*, and `found`, how many of the vocabulary's words had one. Only the
+vocabulary's words are kept, so a large file needs little memory. Gzipped files aren't read:
+gunzip them first.
+
+```clay norun
+v = Ann loadWordVectors("glove.6B.100d.txt", tok)
+("found vectors for " + (v get("found")) toString + " words") println
+net = Ann network(#{"loss": "cross_entropy"}) input(200) embedding(tok vocabSize, 100, 0, true)
+net conv1d(64, 5, "relu") globalMaxPool output(2, "softmax")
+net setWeights(1, v get("vectors")) freeze(1)    // learn only the layers above
+```
+
+Options: `vocabSize` (the rows; default `tok vocabSize`), `dim` (checked against the file),
+`missing` (`"zeros"`, the default, or `"random"`, normal with the found vectors' mean and spread,
+so the words can train apart in an unfrozen embedding), `seed`, and `paddingId` (the row kept
+zero, default 0). `tok` can also be a Dict of word to id. GloVe's words are lower case and its
+text had contractions split, so `preprocess: ["stripHtml", "splitContractions"]` finds more of
+them.
 
 ## Training controls
 
@@ -375,11 +465,18 @@ them; `Ann version` is libann's version.
   clay bricks/ann/examples/mnist.clay bricks/ann/native/libann/data/fashion-mnist_test.csv
   ```
 
+- [`examples/text_classification.clay`](examples/text_classification.clay): short synthetic reviews
+  whose sentiment depends on negations ("not bad"). `Ann tokenizer` and `encodePadded`, a masked
+  embedding, `conv1d` and `globalMaxPool` (100% test accuracy) against a bag-of-words network
+  (about 76%), then saving the network with its tokenizer. A port of pyann's example; it runs in
+  about a second.
+
 ## Development
 
 libann is a git submodule (`native/libann`); clone with `--recurse-submodules`. The plugin is
-`native/clay_ann.c`, and the Clay API is `src/main.clay`. Run the tests from the brick's
-directory with `clay tests/test_ann.clay`; GitHub Actions runs them on Linux, macOS and Windows
+`native/clay_ann.c` (the tokenizer is `native/clay_text.c`), and the Clay API is `src/main.clay`.
+Run the tests from the brick's directory with `clay tests/test_ann.clay` and
+`clay tests/test_text.clay`; GitHub Actions runs them on Linux, macOS and Windows
 (`.github/workflows/test.yml`).
 
 ## License
